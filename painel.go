@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"time"
 )
 
 const portaPainelPadrao = 7799
@@ -92,6 +96,7 @@ func handlerPainel(raiz string) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(resp)
 	})
+	mux.HandleFunc("/api/logs", handlerLogs(raiz))
 	return mux
 }
 
@@ -196,6 +201,205 @@ func abrirNavegador(url string) {
 	_ = cmd.Start()
 }
 
+// handlerLogs transmite (SSE) o log mais recente da pasta logs em tempo real:
+// segue o arquivo enquanto ele cresce e troca sozinho quando surge um log mais
+// novo (nova fase/gate). Somente leitura.
+func handlerLogs(raiz string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming nao suportado", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+
+		dir := dirLogs(raiz)
+		ctx := r.Context()
+		tick := time.NewTicker(600 * time.Millisecond)
+		defer tick.Stop()
+
+		var atual, pendente string
+		var offset int64
+		primeiro := true
+		ocioso := 0
+
+		fmt.Fprint(w, ": conectado\n\n")
+		flusher.Flush()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+
+			novo := logMaisRecente(dir)
+			if novo == "" {
+				if ocioso++; ocioso%25 == 0 {
+					fmt.Fprint(w, ": ping\n\n")
+					flusher.Flush()
+				}
+				continue
+			}
+			if novo != atual {
+				atual, pendente, offset = novo, "", 0
+				if primeiro { // no primeiro anexo, comeca perto do fim
+					offset = deslocamentoInicial(atual)
+				}
+				primeiro = false
+				escreverSSE(w, "arquivo", filepath.Base(atual))
+				flusher.Flush()
+			}
+
+			f, err := os.Open(atual)
+			if err != nil {
+				continue
+			}
+			info, err := f.Stat()
+			if err != nil {
+				f.Close()
+				continue
+			}
+			if info.Size() < offset { // truncado/rotacionado
+				offset, pendente = 0, ""
+			}
+			enviou := false
+			if info.Size() > offset {
+				buf := make([]byte, info.Size()-offset)
+				n, _ := f.ReadAt(buf, offset)
+				offset += int64(n)
+				pendente += string(buf[:n])
+				for {
+					i := strings.IndexByte(pendente, '\n')
+					if i < 0 {
+						break
+					}
+					linha := strings.TrimRight(pendente[:i], "\r")
+					pendente = pendente[i+1:]
+					if txt, ok := formatarLogLinha(atual, linha); ok {
+						escreverSSE(w, "", txt)
+						enviou = true
+					}
+				}
+			}
+			f.Close()
+			if enviou {
+				flusher.Flush()
+				ocioso = 0
+			} else if ocioso++; ocioso%25 == 0 {
+				fmt.Fprint(w, ": ping\n\n")
+				flusher.Flush()
+			}
+		}
+	}
+}
+
+// deslocamentoInicial devolve um offset perto do fim do arquivo (ultimos ~16
+// KB, alinhado ao inicio da proxima linha) para nao despejar o historico
+// inteiro ao abrir o painel.
+func deslocamentoInicial(caminho string) int64 {
+	const cauda = 16 * 1024
+	info, err := os.Stat(caminho)
+	if err != nil || info.Size() <= cauda {
+		return 0
+	}
+	off := info.Size() - cauda
+	f, err := os.Open(caminho)
+	if err != nil {
+		return off
+	}
+	defer f.Close()
+	b := make([]byte, cauda)
+	n, _ := f.ReadAt(b, off)
+	if i := bytes.IndexByte(b[:n], '\n'); i >= 0 {
+		off += int64(i) + 1
+	}
+	return off
+}
+
+// logMaisRecente devolve o caminho do log modificado mais recentemente em dir
+// (.jsonl do claude ou .log dos gates).
+func logMaisRecente(dir string) string {
+	entradas, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	var melhor string
+	var melhorT time.Time
+	for _, e := range entradas {
+		if e.IsDir() {
+			continue
+		}
+		nome := e.Name()
+		if !strings.HasSuffix(nome, ".jsonl") && !strings.HasSuffix(nome, ".log") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(melhorT) {
+			melhorT = info.ModTime()
+			melhor = filepath.Join(dir, nome)
+		}
+	}
+	return melhor
+}
+
+// formatarLogLinha transforma uma linha de log no texto exibido no terminal do
+// painel. Linhas .jsonl (stream-json do claude) viram texto legivel; .log dos
+// gates saem como estao. O bool diz se a linha deve ser mostrada.
+func formatarLogLinha(caminho, linha string) (string, bool) {
+	if strings.TrimSpace(linha) == "" {
+		return "", false
+	}
+	if !strings.HasSuffix(caminho, ".jsonl") {
+		return linha, true
+	}
+	var ev eventoStream
+	if json.Unmarshal([]byte(linha), &ev) != nil {
+		return "", false
+	}
+	switch ev.Type {
+	case "assistant":
+		var partes []string
+		for _, c := range ev.Message.Content {
+			switch c.Type {
+			case "text":
+				if t := strings.TrimSpace(c.Text); t != "" {
+					partes = append(partes, t)
+				}
+			case "tool_use":
+				partes = append(partes, "→ "+c.Name)
+			}
+		}
+		if len(partes) == 0 {
+			return "", false
+		}
+		return strings.Join(partes, "\n"), true
+	case "result":
+		if ev.TotalCostUSD > 0 {
+			return fmt.Sprintf("── run: US$ %.2f · %d turnos ──", ev.TotalCostUSD, ev.NumTurns), true
+		}
+	}
+	return "", false
+}
+
+// escreverSSE emite um evento Server-Sent Events (nome opcional + dados, que
+// podem ser multilinha).
+func escreverSSE(w http.ResponseWriter, evento, dados string) {
+	if evento != "" {
+		fmt.Fprintf(w, "event: %s\n", evento)
+	}
+	for _, l := range strings.Split(dados, "\n") {
+		fmt.Fprintf(w, "data: %s\n", l)
+	}
+	fmt.Fprint(w, "\n")
+}
+
 const paginaPainel = `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -241,6 +445,18 @@ const paginaPainel = `<!DOCTYPE html>
   .tag{font-size:11px;background:var(--card2);border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:var(--muted)}
   .err{background:rgba(255,107,107,.12);border:1px solid var(--fail);color:#ffd0d0;padding:14px 16px;border-radius:10px}
   footer{color:var(--muted);font-size:12px;text-align:center;padding:18px}
+  .term-wrap{margin-top:24px;background:#080b12;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .term-head{display:flex;align-items:center;gap:10px;padding:8px 14px;background:#0f1626;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted)}
+  .term-dots{display:inline-flex;gap:6px}
+  .term-dots i{width:11px;height:11px;border-radius:50%}
+  .term-dots i:nth-child(1){background:#ff5f56}.term-dots i:nth-child(2){background:#ffbd2e}.term-dots i:nth-child(3){background:#27c93f}
+  .term-file{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--fg)}
+  .term-follow{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+  .term{margin:0;padding:14px 16px;height:360px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px;line-height:1.55;color:#cfe3ff;white-space:pre-wrap;word-break:break-word}
+  .term div{padding:1px 0}
+  .term .l-tool{color:#5b8cff}
+  .term .l-cost{color:#3ecf8e}
+  .term .l-sys{color:#8b98b8}
   @media(max-width:640px){.hide-sm{display:none}}
 </style>
 </head>
@@ -266,8 +482,17 @@ const paginaPainel = `<!DOCTYPE html>
     </tr></thead>
     <tbody id="linhas"></tbody>
   </table>
+  <section class="term-wrap">
+    <div class="term-head">
+      <span class="term-dots"><i></i><i></i><i></i></span>
+      <span id="log-arq" class="term-file">logs</span>
+      <span class="spacer"></span>
+      <label class="term-follow"><input type="checkbox" id="seguir" checked> auto-scroll</label>
+    </div>
+    <div id="term" class="term"></div>
+  </section>
 </main>
-<footer>Atualiza automaticamente a cada 3 s · Praxis</footer>
+<footer>Fases atualizam a cada 3 s · logs em tempo real (SSE) · Praxis</footer>
 <script>
 const ORDEM = ["executando","falhou","bloqueada","pendente","concluida","adiada"];
 const ROTULO = {concluida:"Concluídas",executando:"Executando",falhou:"Falharam",bloqueada:"Bloqueadas",adiada:"Adiadas",pendente:"Pendentes"};
@@ -318,6 +543,28 @@ function render(d){
 }
 tick();
 setInterval(tick, 3000);
+
+// --- terminal de logs ao vivo (SSE) ---
+const termEl = document.getElementById("term");
+const seguirEl = document.getElementById("seguir");
+const arqEl = document.getElementById("log-arq");
+function addLinha(txt, cls){
+  const div = document.createElement("div");
+  if(cls) div.className = cls;
+  else if(txt.startsWith("→")) div.className = "l-tool";
+  else if(txt.startsWith("──")) div.className = "l-cost";
+  div.textContent = txt;
+  termEl.appendChild(div);
+  while(termEl.childNodes.length > 800) termEl.removeChild(termEl.firstChild);
+  if(seguirEl.checked) termEl.scrollTop = termEl.scrollHeight;
+}
+function conectarLogs(){
+  const es = new EventSource("/api/logs");
+  es.addEventListener("arquivo", e => { arqEl.textContent = e.data; addLinha("──── "+e.data+" ────", "l-sys"); });
+  es.onmessage = e => addLinha(e.data);
+  // EventSource reconecta sozinho em caso de queda
+}
+conectarLogs();
 </script>
 </body>
 </html>`

@@ -163,6 +163,11 @@ O painel:
 - Mostra cartões de resumo por status, barra de progresso, custo total e uma
   tabela com fase, título, status (com ícones), dependências, tentativas, custo
   e observação — as mesmas informações do CSV.
+- Traz um **terminal embutido** que transmite (via **SSE**) o log mais recente
+  de `automacao/logs/` em tempo real: segue o arquivo enquanto ele cresce e
+  troca sozinho quando começa uma nova fase/gate. As linhas do `claude`
+  (`.jsonl`) viram texto legível (mensagens e chamadas de ferramenta) e a saída
+  dos gates (`.log`) aparece como está. Tem `auto-scroll` (desmarcável).
 - Não tem dependências externas nem grava nada: é **somente leitura**. Encerre
   com **Ctrl+C**.
 
