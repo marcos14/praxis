@@ -24,9 +24,10 @@ type OpcoesClaude struct {
 	AddDirs    []string
 	BudgetUSD  float64
 	TimeoutMin int
-	JSONSchema string   // se definido, força saida estruturada (--json-schema)
-	Disallowed []string // ferramentas proibidas (--disallowedTools)
-	RotuloLog  string   // prefixo do arquivo .jsonl em automacao/logs/
+	JSONSchema string          // se definido, força saida estruturada (--json-schema)
+	Disallowed []string        // ferramentas proibidas (--disallowedTools)
+	RotuloLog  string          // prefixo do arquivo .jsonl em automacao/logs/
+	Ctx        context.Context // contexto pai (cancelamento via Ctrl+C); nil = background
 }
 
 type ResultadoClaude struct {
@@ -94,7 +95,11 @@ func rodarClaude(op OpcoesClaude) (*ResultadoClaude, error) {
 	if timeout <= 0 {
 		timeout = 2 * time.Hour
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	pai := op.Ctx
+	if pai == nil {
+		pai = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(pai, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
@@ -149,6 +154,9 @@ func rodarClaude(op OpcoesClaude) (*ResultadoClaude, error) {
 	errWait := cmd.Wait()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return nil, fmt.Errorf("claude excedeu o timeout de %v — log: %s", timeout, logPath)
+	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return nil, fmt.Errorf("execucao interrompida — log: %s", logPath)
 	}
 	if res == nil {
 		return nil, fmt.Errorf("claude terminou sem evento de resultado (scan: %v, exit: %v)\nstderr: %s\nlog: %s",

@@ -12,10 +12,82 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
 const portaPainelPadrao = 7799
+
+// estadoExecucao guarda, em memoria, o estado ao vivo de uma rodada do
+// `executar --painel`, para que o painel continue de pe e mostre por que a
+// execucao terminou — fim normal, falha de fase, interrupcao (Ctrl+C) ou
+// panico. E compartilhado entre o pipeline e o servidor HTTP do painel.
+type estadoExecucao struct {
+	mu        sync.Mutex
+	ativa     bool   // a rodada ainda esta em andamento
+	situacao  string // executando|concluido|falhou|interrompido|erro
+	motivo    string // mensagem/motivo da parada
+	faseAtual string // fase corrente (informativo)
+}
+
+// execInfo e a projecao serializavel de estadoExecucao exposta no /api/status.
+type execInfo struct {
+	Ativa     bool   `json:"ativa"`
+	Situacao  string `json:"situacao"`
+	Motivo    string `json:"motivo"`
+	FaseAtual string `json:"fase_atual"`
+}
+
+func novoEstadoExecucao() *estadoExecucao {
+	return &estadoExecucao{ativa: true, situacao: "executando"}
+}
+
+func (e *estadoExecucao) definir(situacao, motivo string) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.situacao, e.motivo = situacao, motivo
+	e.mu.Unlock()
+}
+
+func (e *estadoExecucao) definirFase(fase string) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.faseAtual = fase
+	e.mu.Unlock()
+}
+
+func (e *estadoExecucao) encerrar(situacao, motivo string) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.ativa, e.situacao, e.motivo = false, situacao, motivo
+	e.mu.Unlock()
+}
+
+// emAndamento diz se a rodada ainda nao foi finalizada (usado para decidir se
+// um Ctrl+C interrompe a rodada ou fecha o painel).
+func (e *estadoExecucao) emAndamento() bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.ativa
+}
+
+func (e *estadoExecucao) info() *execInfo {
+	if e == nil {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return &execInfo{Ativa: e.ativa, Situacao: e.situacao, Motivo: e.motivo, FaseAtual: e.faseAtual}
+}
 
 // cmdPainel sobe o microsite de acompanhamento e bloqueia servindo ate o
 // usuario interromper (Ctrl+C). Le o fases.csv a cada requisicao, entao
@@ -44,12 +116,13 @@ func cmdPainel(argv []string) error {
 		abrirNavegador(url)
 	}
 	fmt.Println("\nCtrl+C para encerrar o painel.")
-	return http.Serve(ln, handlerPainel(raiz))
+	return http.Serve(ln, handlerPainel(raiz, nil))
 }
 
 // iniciarPainel sobe o painel em segundo plano (usado pelo `executar --painel`).
 // Devolve a URL local; nunca aborta a execucao — falhas sao apenas avisadas.
-func iniciarPainel(raiz string, porta int, abrir bool) string {
+// O estado da rodada (est) e compartilhado para o painel refletir uma parada.
+func iniciarPainel(raiz string, porta int, abrir bool, est *estadoExecucao) string {
 	ln, err := escutarPainel(porta)
 	if err != nil {
 		fmt.Printf("AVISO: nao consegui subir o painel: %v\n", err)
@@ -57,7 +130,7 @@ func iniciarPainel(raiz string, porta int, abrir bool) string {
 	}
 	url := fmt.Sprintf("http://localhost:%d", ln.Addr().(*net.TCPAddr).Port)
 	imprimirEnderecos(ln.Addr().(*net.TCPAddr).Port)
-	go func() { _ = http.Serve(ln, handlerPainel(raiz)) }()
+	go func() { _ = http.Serve(ln, handlerPainel(raiz, est)) }()
 	if abrir {
 		abrirNavegador(url)
 	}
@@ -80,7 +153,7 @@ func imprimirEnderecos(porta int) {
 	}
 }
 
-func handlerPainel(raiz string) http.Handler {
+func handlerPainel(raiz string, est *estadoExecucao) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -91,7 +164,7 @@ func handlerPainel(raiz string) http.Handler {
 		_, _ = w.Write([]byte(paginaPainel))
 	})
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
-		resp := montarStatus(raiz)
+		resp := montarStatus(raiz, est)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(resp)
@@ -122,13 +195,15 @@ type painelStatus struct {
 	Resumo     map[string]int `json:"resumo"`
 	Total      int            `json:"total"`
 	CustoTotal float64        `json:"custo_total"`
+	Execucao   *execInfo      `json:"execucao,omitempty"`
 	Fases      []painelFase   `json:"fases"`
 }
 
-func montarStatus(raiz string) painelStatus {
+func montarStatus(raiz string, est *estadoExecucao) painelStatus {
 	st := painelStatus{
 		Atualizado: agoraLegivel(),
 		Resumo:     map[string]int{},
+		Execucao:   est.info(),
 		Fases:      []painelFase{},
 	}
 	if abs, err := filepath.Abs(raiz); err == nil {
@@ -444,6 +519,15 @@ const paginaPainel = `<!DOCTYPE html>
   .obs{font-size:12px;color:var(--muted);max-width:280px}
   .tag{font-size:11px;background:var(--card2);border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:var(--muted)}
   .err{background:rgba(255,107,107,.12);border:1px solid var(--fail);color:#ffd0d0;padding:14px 16px;border-radius:10px}
+  .banner{padding:14px 16px;border-radius:10px;margin-bottom:16px;border:1px solid var(--line)}
+  .banner b{font-size:15px}
+  .banner-motivo{margin-top:6px;font-size:13px;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+  .banner-sub{margin-top:6px;font-size:12px;color:var(--muted)}
+  .banner-ok{background:rgba(62,207,142,.12);border-color:var(--ok)}
+  .banner-fail{background:rgba(255,107,107,.12);border-color:var(--fail);color:#ffd7d7}
+  .banner-warn{background:rgba(255,207,91,.12);border-color:var(--block);color:#ffe9b0}
+  .banner-off{background:rgba(139,152,184,.14);border-color:var(--muted);color:var(--fg)}
+  .dot.off{background:var(--muted);animation:none;box-shadow:none}
   footer{color:var(--muted);font-size:12px;text-align:center;padding:18px}
   .term-wrap{margin-top:24px;background:#080b12;border:1px solid var(--line);border-radius:12px;overflow:hidden}
   .term-head{display:flex;align-items:center;gap:10px;padding:8px 14px;background:#0f1626;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted)}
@@ -471,6 +555,7 @@ const paginaPainel = `<!DOCTYPE html>
   <div class="sub" id="upd"></div>
 </header>
 <main>
+  <div id="exec"></div>
   <div id="erro"></div>
   <div class="cards" id="cards"></div>
   <div class="bar" id="bar"></div>
@@ -503,10 +588,38 @@ async function tick(){
   try{
     const r = await fetch("/api/status",{cache:"no-store"});
     const d = await r.json();
+    setOffline(false);
     render(d);
-  }catch(e){ document.getElementById("sub").textContent = "sem conexão com o servidor…"; }
+  }catch(e){ setOffline(true); }
+}
+function setOffline(off){
+  document.querySelector(".dot").classList.toggle("off", off);
+  const el = document.getElementById("exec");
+  if(off){
+    document.getElementById("sub").textContent = "sem conexão com o Praxis…";
+    el.innerHTML = '<div class="banner banner-off"><b>🔌 Sem conexão com o Praxis</b>'+
+      '<div class="banner-sub">A aplicação foi encerrada ou está inacessível. Reabra o painel quando o Praxis voltar a rodar. Tentando reconectar…</div></div>';
+    window.__offline = true;
+  }else if(window.__offline){
+    window.__offline = false; el.innerHTML = "";
+  }
+}
+function renderExec(ex){
+  const el = document.getElementById("exec");
+  if(!ex || ex.ativa || !ex.situacao || ex.situacao==="executando"){ el.innerHTML=""; return; }
+  const mapa = {
+    concluido:    ["ok","✅","Execução concluída"],
+    falhou:       ["fail","❌","Execução parou: uma fase falhou"],
+    interrompido: ["warn","⛔","Execução interrompida"],
+    erro:         ["fail","💥","Execução abortada por erro interno"],
+  };
+  const m = mapa[ex.situacao] || ["warn","⚠","Execução encerrada"];
+  el.innerHTML = '<div class="banner banner-'+m[0]+'"><b>'+m[1]+' '+m[2]+'</b>'+
+    (ex.motivo? '<div class="banner-motivo">'+esc(ex.motivo)+'</div>':'')+
+    '<div class="banner-sub">O painel continua no ar (somente leitura). O Praxis não está mais executando fases.</div></div>';
 }
 function render(d){
+  renderExec(d.execucao);
   document.getElementById("proj").textContent = d.projeto ? "· "+d.projeto : "";
   document.getElementById("upd").textContent = "atualizado " + (d.atualizado||"");
   const erro = document.getElementById("erro");

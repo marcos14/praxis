@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"os"
+	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
+	"syscall"
 )
 
 const schemaVeredito = `{"type":"object","required":["veredito","problemas"],"properties":{"veredito":{"type":"string","enum":["APROVADO","REPROVADO"]},"problemas":{"type":"array","items":{"type":"string"}}}}`
@@ -40,8 +45,30 @@ func cmdExecutar(argv []string) error {
 		return err
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var estado *estadoExecucao
 	if *painel {
-		iniciarPainel(raiz, *portaPainel, true)
+		estado = novoEstadoExecucao()
+		iniciarPainel(raiz, *portaPainel, true, estado)
+		// Com o painel no ar, o Ctrl+C nao mata o processo de imediato: a
+		// primeira interrupcao encerra a rodada em andamento e MANTEM o painel
+		// de pe (para o usuario ver o motivo da parada); a segunda fecha tudo.
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			for s := range sig {
+				if estado.emAndamento() && ctx.Err() == nil {
+					fmt.Printf("\n⚠ %v recebido — interrompendo a rodada; o painel continua no ar (Ctrl+C de novo para fechar).\n", s)
+					estado.definir("interrompido", "interrompido pelo usuário ("+s.String()+")")
+					cancel()
+				} else {
+					fmt.Println("\nfechando o painel.")
+					os.Exit(130)
+				}
+			}
+		}()
 	}
 
 	var rodadas []*Fase
@@ -49,7 +76,8 @@ func cmdExecutar(argv []string) error {
 	motivoParada := "fila processada"
 
 	executarUma := func(f *Fase) error {
-		errFase := pipelineFase(raiz, cfg, fases, f)
+		estado.definirFase(f.Fase)
+		errFase := pipelineFase(ctx, raiz, cfg, fases, f)
 		if err := salvarFases(csvPath, fases); err != nil {
 			fmt.Printf("AVISO: nao consegui salvar %s: %v\n", csvPath, err)
 		}
@@ -65,53 +93,114 @@ func cmdExecutar(argv []string) error {
 		return errFase
 	}
 
-	if fs.NArg() > 0 {
-		// modo explicito: "executar 2d" ou "executar 2d,2e ..."
-		for _, nome := range separarLista(fs.Args()) {
-			if strings.HasPrefix(nome, "-") {
-				return fmt.Errorf("flags devem vir antes das fases: `executar %s 2d` (nao `executar 2d %s`)", nome, nome)
+	// A rodada roda dentro de um recover: um panico numa fase nao pode derrubar
+	// o processo (e o painel junto) — vira uma parada com motivo apresentavel.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				errParada = fmt.Errorf("erro interno (panic): %v", r)
+				motivoParada = fmt.Sprintf("erro interno (panic): %v\n%s", r, primeirasLinhas(string(debug.Stack()), 8))
+				fmt.Fprintf(os.Stderr, "\nPANICO capturado: %v\n", r)
 			}
-			f := buscarFase(fases, nome)
-			if f == nil {
-				return fmt.Errorf("fase %q nao existe em %s", nome, csvPath)
-			}
-			if f.Status == StConcluida {
-				fmt.Printf("fase %s ja esta concluida — pulando\n", f.Fase)
-				continue
-			}
-			if !*forcar {
-				if pend := depsPendentes(fases, f); len(pend) > 0 {
-					return fmt.Errorf("fase %s depende de fases nao concluidas: %s (use --forcar para ignorar)",
-						f.Fase, strings.Join(pend, ", "))
+		}()
+
+		if fs.NArg() > 0 {
+			// modo explicito: "executar 2d" ou "executar 2d,2e ..."
+			for _, nome := range separarLista(fs.Args()) {
+				if ctx.Err() != nil {
+					break
+				}
+				if strings.HasPrefix(nome, "-") {
+					errParada = fmt.Errorf("flags devem vir antes das fases: `executar %s 2d` (nao `executar 2d %s`)", nome, nome)
+					return
+				}
+				f := buscarFase(fases, nome)
+				if f == nil {
+					errParada = fmt.Errorf("fase %q nao existe em %s", nome, csvPath)
+					return
+				}
+				if f.Status == StConcluida {
+					fmt.Printf("fase %s ja esta concluida — pulando\n", f.Fase)
+					continue
+				}
+				if !*forcar {
+					if pend := depsPendentes(fases, f); len(pend) > 0 {
+						errParada = fmt.Errorf("fase %s depende de fases nao concluidas: %s (use --forcar para ignorar)",
+							f.Fase, strings.Join(pend, ", "))
+						return
+					}
+				}
+				if err := executarUma(f); err != nil {
+					errParada = err
+					motivoParada = err.Error()
+					break
 				}
 			}
-			if err := executarUma(f); err != nil {
-				errParada = err
-				motivoParada = err.Error()
-				break
+		} else {
+			// modo sequencia: roda tudo que estiver pronto, ate acabar ou falhar
+			for {
+				if ctx.Err() != nil {
+					break
+				}
+				f, motivo := proximaPronta(fases)
+				if err := salvarFases(csvPath, fases); err != nil { // persiste bloqueadas
+					fmt.Printf("AVISO: nao consegui salvar %s: %v\n", csvPath, err)
+				}
+				if f == nil {
+					motivoParada = motivo
+					break
+				}
+				if err := executarUma(f); err != nil {
+					errParada = err
+					motivoParada = err.Error()
+					break
+				}
 			}
 		}
-	} else {
-		// modo sequencia: roda tudo que estiver pronto, ate acabar ou falhar
-		for {
-			f, motivo := proximaPronta(fases)
-			if err := salvarFases(csvPath, fases); err != nil { // persiste bloqueadas
-				fmt.Printf("AVISO: nao consegui salvar %s: %v\n", csvPath, err)
-			}
-			if f == nil {
-				motivoParada = motivo
-				break
-			}
-			if err := executarUma(f); err != nil {
-				errParada = err
-				motivoParada = err.Error()
-				break
+	}()
+
+	// Interrupcao (Ctrl+C) nao e falha de execucao: reverte a fase que estava
+	// rodando para `pendente` (para poder reexecutar) e prevalece como motivo.
+	if ctx.Err() != nil {
+		if fa := estado.info().FaseAtual; fa != "" {
+			if f := buscarFase(fases, fa); f != nil && (f.Status == StExecutando || f.Status == StFalhou) {
+				f.Status = StPendente
+				f.Observacao = "interrompido pelo usuário — reexecute quando quiser"
+				if err := salvarFases(csvPath, fases); err != nil {
+					fmt.Printf("AVISO: nao consegui salvar %s: %v\n", csvPath, err)
+				}
 			}
 		}
+		if motivoParada == "" || errParada != nil {
+			motivoParada = "interrompido pelo usuário (Ctrl+C)"
+		}
+		errParada = nil
 	}
 
 	caminhoResumo := escreverResumo(raiz, rodadas, motivoParada)
 	notificar(tituloNotificacao(rodadas, errParada), motivoParada+"\nResumo: "+caminhoResumo)
+
+	// Com o painel no ar, nunca deixamos o processo morrer sozinho: finaliza o
+	// estado (que o painel mostra num banner) e segue servindo o painel ate o
+	// usuario fechar com Ctrl+C.
+	if estado != nil {
+		situacao := "concluido"
+		switch {
+		case ctx.Err() != nil:
+			situacao = "interrompido"
+		case errParada != nil && strings.HasPrefix(motivoParada, "erro interno (panic)"):
+			situacao = "erro"
+		case errParada != nil:
+			situacao = "falhou"
+		}
+		estado.encerrar(situacao, motivoParada)
+		fmt.Println("\n────────────────────────────────────────────────────")
+		fmt.Printf("Execução encerrada (%s). Motivo:\n  %s\n", situacao, motivoParada)
+		fmt.Println("O painel continua no ar para você conferir o estado.")
+		fmt.Println("Pressione Ctrl+C para fechar o painel.")
+		select {} // bloqueia; o handler de sinal encerra o processo
+	}
+
 	return errParada
 }
 
@@ -154,7 +243,8 @@ func depsPendentes(fases []*Fase, f *Fase) []string {
 // pipelineFase executa o ciclo completo de uma fase:
 // executor -> gates (com correcoes) -> revisor (com correcao) -> guarda do
 // plano -> commit local. Devolve erro quando a fase falha (ja marcada no CSV).
-func pipelineFase(raiz string, cfg *Config, todas []*Fase, f *Fase) error {
+// ctx permite interromper (Ctrl+C) o run do claude em andamento.
+func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, f *Fase) error {
 	fmt.Printf("\n════════ Fase %s — %s ════════\n", f.Fase, f.Titulo)
 
 	// pre-checagem: arvores limpas em todos os repos envolvidos, ignorando os
@@ -206,6 +296,7 @@ func pipelineFase(raiz string, cfg *Config, todas []*Fase, f *Fase) error {
 			AddDirs: cfg.AddDirs, BudgetUSD: cfg.MaxBudgetUSD, TimeoutMin: cfg.TimeoutMin,
 			JSONSchema: schema, Disallowed: proibidos,
 			RotuloLog: fmt.Sprintf("fase-%s-%s", f.Fase, rotulo),
+			Ctx:       ctx,
 		})
 		if res != nil {
 			custo += res.CustoUSD
@@ -299,6 +390,7 @@ func pipelineFase(raiz string, cfg *Config, todas []*Fase, f *Fase) error {
 			Raiz: raiz, Prompt: prompt, Modelo: modelo, AddDirs: cfg.AddDirs,
 			BudgetUSD: cfg.MaxBudgetUSD, TimeoutMin: cfg.TimeoutMin,
 			Disallowed: proibidosSempre, RotuloLog: fmt.Sprintf("fase-%s-plano", f.Fase),
+			Ctx:        ctx,
 		})
 		if err == nil && res != nil {
 			custo += res.CustoUSD
