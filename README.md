@@ -198,6 +198,11 @@ atualizando conforme as fases avançam), use `executar --painel` — veja abaixo
 - Fase que falhou: veja o motivo em `status`/`observacao` e nos logs, corrija
   (ou não) manualmente, e rode `executar <fase>` de novo — reexecutar uma fase
   explícita é permitido para status `falhou`.
+- **Franquia de tokens esgotada:** se o `claude` interromper um run porque o
+  limite de sessão foi atingido (ex.: *"You've hit your session limit · resets
+  11:40pm"*), o Praxis **não marca a fase como falha** — ele dorme **15 minutos**
+  e retoma a mesma fase automaticamente, repetindo até o reset liberar a cota.
+  Enquanto espera, imprime o horário de retomada; **Ctrl+C** aborta.
 
 ## Arquivos por projeto (referência)
 

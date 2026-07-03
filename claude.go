@@ -38,7 +38,15 @@ type ResultadoClaude struct {
 	CustoUSD    float64
 	NumTurns    int
 	LogPath     string
+
+	LimiteSessao  bool   // a franquia de tokens/limite de sessao foi atingida
+	DetalheLimite string // linha do claude com o horario de reset, quando houver
 }
+
+// esperaResetFranquia e quanto o orquestrador dorme quando a franquia de
+// tokens acaba, antes de tentar continuar a mesma execucao. E variavel (e nao
+// const) para os testes poderem encurtar a espera.
+var esperaResetFranquia = 15 * time.Minute
 
 // eventoStream cobre o subconjunto dos eventos stream-json que interessa.
 type eventoStream struct {
@@ -58,11 +66,73 @@ type eventoStream struct {
 	} `json:"message"`
 }
 
-// rodarClaude executa `claude -p` com stream-json: mostra o progresso ao
-// vivo no console, grava cada evento em um .jsonl e devolve o resultado
-// final (inclusive quando o run termina com is_error=true — quem decide o
-// que fazer e o chamador).
+// rodarClaude executa `claude -p` com stream-json e trata a franquia de
+// tokens: quando o run termina porque o limite de sessao foi atingido, dorme
+// esperaResetFranquia (15 min) e tenta a MESMA execucao de novo, ate passar o
+// horario de reset (ou o usuario abortar com Ctrl+C). Nos demais casos devolve
+// o resultado final — inclusive com is_error=true — e quem decide o que fazer
+// e o chamador.
 func rodarClaude(op OpcoesClaude) (*ResultadoClaude, error) {
+	for {
+		res, err := rodarClaudeUmaVez(op)
+		if err != nil || res == nil || !res.LimiteSessao {
+			return res, err
+		}
+		if err := esperarResetFranquia(op.Ctx, res); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// esperarResetFranquia dorme esperaResetFranquia respeitando o cancelamento
+// (Ctrl+C) do contexto pai; devolve erro so se a espera for interrompida.
+func esperarResetFranquia(ctx context.Context, res *ResultadoClaude) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	detalhe := strings.TrimSpace(res.DetalheLimite)
+	if detalhe == "" {
+		detalhe = "franquia de tokens esgotada (limite de sessao)"
+	}
+	retomar := time.Now().Add(esperaResetFranquia)
+	fmt.Printf("\n⏳ %s\n", detalhe)
+	fmt.Printf("   Franquia de tokens esgotada — dormindo %v e retomando a mesma fase as %s (Ctrl+C aborta).\n",
+		esperaResetFranquia, retomar.Format("15:04"))
+	t := time.NewTimer(esperaResetFranquia)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("execucao interrompida durante a espera do reset da franquia")
+	case <-t.C:
+		fmt.Println("⏳ retomando apos a espera da franquia...")
+		return nil
+	}
+}
+
+// limiteSessaoAtingido reconhece a mensagem que o claude imprime quando a
+// franquia de tokens acaba (ex.: "You've hit your session limit · resets
+// 11:40pm" ou "Claude usage limit reached ... will reset at ...").
+func limiteSessaoAtingido(texto string) bool {
+	t := strings.ToLower(texto)
+	return (strings.Contains(t, "session limit") || strings.Contains(t, "usage limit")) &&
+		strings.Contains(t, "reset")
+}
+
+// linhaLimite extrai a primeira linha do texto que menciona o limite/reset,
+// para exibir ao usuario o horario de retomada informado pelo claude.
+func linhaLimite(texto string) string {
+	for _, l := range strings.Split(texto, "\n") {
+		if limiteSessaoAtingido(l) {
+			return strings.TrimSpace(l)
+		}
+	}
+	return strings.TrimSpace(texto)
+}
+
+// rodarClaudeUmaVez faz uma unica execucao de `claude -p` com stream-json:
+// mostra o progresso ao vivo no console, grava cada evento em um .jsonl e
+// devolve o resultado final.
+func rodarClaudeUmaVez(op OpcoesClaude) (*ResultadoClaude, error) {
 	args := []string{"-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"}
 	if op.Modelo != "" {
 		args = append(args, "--model", op.Modelo)
@@ -116,6 +186,7 @@ func rodarClaude(op OpcoesClaude) (*ResultadoClaude, error) {
 	}
 
 	var res *ResultadoClaude
+	var textoAcc strings.Builder // todo o texto do assistente + resultado, p/ detectar a franquia
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 1024*1024), 64*1024*1024) // resultados de tool podem ser enormes
 	for sc.Scan() {
@@ -132,6 +203,7 @@ func rodarClaude(op OpcoesClaude) (*ResultadoClaude, error) {
 				switch c.Type {
 				case "text":
 					if t := strings.TrimSpace(c.Text); t != "" {
+						textoAcc.WriteString(t + "\n")
 						fmt.Println(indentar(t, "  │ "))
 					}
 				case "tool_use":
@@ -139,6 +211,7 @@ func rodarClaude(op OpcoesClaude) (*ResultadoClaude, error) {
 				}
 			}
 		case "result":
+			textoAcc.WriteString(ev.Result + "\n")
 			res = &ResultadoClaude{
 				IsError:     ev.IsError,
 				Subtipo:     ev.Subtype,
@@ -164,6 +237,10 @@ func rodarClaude(op OpcoesClaude) (*ResultadoClaude, error) {
 	}
 	if res.CustoUSD > 0 {
 		fmt.Printf("  (run: US$ %.2f, %d turnos)\n", res.CustoUSD, res.NumTurns)
+	}
+	if texto := textoAcc.String(); limiteSessaoAtingido(texto) {
+		res.LimiteSessao = true
+		res.DetalheLimite = linhaLimite(texto)
 	}
 	return res, nil
 }
