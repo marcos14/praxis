@@ -6,7 +6,7 @@ import (
 )
 
 func TestDecodificarEstruturadoPreferido(t *testing.T) {
-	res := &ResultadoClaude{
+	res := &ResultadoRun{
 		Estruturado: json.RawMessage(`{"veredito":"APROVADO","problemas":[]}`),
 		Resultado:   "texto qualquer",
 	}
@@ -20,7 +20,7 @@ func TestDecodificarEstruturadoPreferido(t *testing.T) {
 }
 
 func TestDecodificarEstruturadoDoTextoComCercas(t *testing.T) {
-	res := &ResultadoClaude{
+	res := &ResultadoRun{
 		Resultado: "Segue o veredito:\n```json\n{\"veredito\":\"REPROVADO\",\"problemas\":[\"faltou teste de migracao\"]}\n```\n",
 	}
 	var v Veredito
@@ -33,7 +33,7 @@ func TestDecodificarEstruturadoDoTextoComCercas(t *testing.T) {
 }
 
 func TestDecodificarEstruturadoSemJSON(t *testing.T) {
-	res := &ResultadoClaude{Resultado: "sem json nenhum"}
+	res := &ResultadoRun{Resultado: "sem json nenhum"}
 	var v Veredito
 	if err := decodificarEstruturado(res, &v); err == nil {
 		t.Fatal("esperava erro para resposta sem JSON")
@@ -42,7 +42,7 @@ func TestDecodificarEstruturadoSemJSON(t *testing.T) {
 
 func TestParseEventoResult(t *testing.T) {
 	linha := `{"type":"result","subtype":"success","is_error":false,"result":"tudo certo","total_cost_usd":3.21,"num_turns":17,"structured_output":{"veredito":"APROVADO","problemas":[]}}`
-	var ev eventoStream
+	var ev eventoStreamClaude
 	if err := json.Unmarshal([]byte(linha), &ev); err != nil {
 		t.Fatal(err)
 	}

@@ -14,12 +14,6 @@ type Veredito struct {
 	Problemas []string `json:"problemas"`
 }
 
-// O commit e responsabilidade do orquestrador — nenhum run pode commitar/pushar.
-var proibidosSempre = []string{"Bash(git commit*)", "Bash(git push*)"}
-
-// O revisor tambem nao pode alterar nada.
-var proibidosRevisor = append([]string{"Edit", "Write", "NotebookEdit"}, proibidosSempre...)
-
 func cmdExecutar(argv []string) error {
 	fs := flag.NewFlagSet("executar", flag.ExitOnError)
 	raizFlag := fs.String("raiz", "", "raiz do projeto (padrao: deteccao automatica)")
@@ -157,6 +151,11 @@ func depsPendentes(fases []*Fase, f *Fase) []string {
 func pipelineFase(raiz string, cfg *Config, todas []*Fase, f *Fase) error {
 	fmt.Printf("\n════════ Fase %s — %s ════════\n", f.Fase, f.Titulo)
 
+	motor, err := selecionarMotor(cfg.Motor)
+	if err != nil {
+		return err
+	}
+
 	// pre-checagem: arvores limpas em todos os repos envolvidos, ignorando os
 	// arquivos do proprio Praxis (automacao/) — churn de bookkeeping nunca
 	// deve bloquear uma fase; o que importa e o trabalho do usuario.
@@ -189,7 +188,7 @@ func pipelineFase(raiz string, cfg *Config, todas []*Fase, f *Fase) error {
 	}
 	vars := map[string]string{"FASE": f.Fase, "TITULO": f.Titulo, "PLANO": cfg.Plano}
 
-	rodar := func(nomePrompt, rotulo string, extras map[string]string, schema string, proibidos []string) (*ResultadoClaude, error) {
+	rodar := func(nomePrompt, rotulo string, extras map[string]string, schema string, somenteLeitura bool) (*ResultadoRun, error) {
 		tpl, err := carregarPrompt(raiz, nomePrompt)
 		if err != nil {
 			return nil, err
@@ -201,21 +200,26 @@ func pipelineFase(raiz string, cfg *Config, todas []*Fase, f *Fase) error {
 		for k, v := range extras {
 			valores[k] = v
 		}
-		res, err := rodarClaude(OpcoesClaude{
+		res, err := motor.Rodar(OpcoesRun{
 			Raiz: raiz, Prompt: renderPrompt(tpl, valores), Modelo: modelo,
 			AddDirs: cfg.AddDirs, BudgetUSD: cfg.MaxBudgetUSD, TimeoutMin: cfg.TimeoutMin,
-			JSONSchema: schema, Disallowed: proibidos,
+			Schema: schema, SomenteLeitura: somenteLeitura, ProibirCommit: true,
 			RotuloLog: fmt.Sprintf("fase-%s-%s", f.Fase, rotulo),
 		})
 		if res != nil {
 			custo += res.CustoUSD
+			// budget soft: motores sem corte nativo de custo tem o orcamento
+			// verificado como teto acumulado da fase, entre os runs.
+			if !motor.Capacidades().BudgetNativo && cfg.MaxBudgetUSD > 0 && custo > cfg.MaxBudgetUSD {
+				return res, fmt.Errorf("orcamento da fase estourado (soft): US$ %.2f > US$ %.2f — motor %q nao corta custo durante o run", custo, cfg.MaxBudgetUSD, motor.Nome())
+			}
 		}
 		return res, err
 	}
 
 	// corrige a entrega (contexto limpo) a partir de um motivo (gates/revisor)
 	corrigir := func(rotulo, motivo string) error {
-		res, err := rodar("corretor.md", rotulo, map[string]string{"MOTIVO": motivo}, "", proibidosSempre)
+		res, err := rodar("corretor.md", rotulo, map[string]string{"MOTIVO": motivo}, "", false)
 		if err != nil {
 			return err
 		}
@@ -249,7 +253,7 @@ func pipelineFase(raiz string, cfg *Config, todas []*Fase, f *Fase) error {
 
 	// 1) executor — a fase em si, contexto limpo
 	fmt.Printf("▶ executor (modelo %s, contexto limpo)\n", modelo)
-	resExec, err := rodar("executor.md", "executor", nil, "", proibidosSempre)
+	resExec, err := rodar("executor.md", "executor", nil, "", false)
 	if err != nil {
 		return falha("executor: %v", err)
 	}
@@ -265,7 +269,7 @@ func pipelineFase(raiz string, cfg *Config, todas []*Fase, f *Fase) error {
 	// 3) revisor (contexto limpo, so leitura) + no maximo MaxCiclosRevisao correcoes
 	for ciclo := 0; ; ciclo++ {
 		fmt.Println("▶ revisor (contexto limpo, so leitura)")
-		resRev, err := rodar("revisor.md", fmt.Sprintf("revisor%d", ciclo+1), nil, schemaVeredito, proibidosRevisor)
+		resRev, err := rodar("revisor.md", fmt.Sprintf("revisor%d", ciclo+1), nil, schemaVeredito, true)
 		if err != nil {
 			return falha("revisor: %v", err)
 		}
@@ -295,10 +299,10 @@ func pipelineFase(raiz string, cfg *Config, todas []*Fase, f *Fase) error {
 		fmt.Println("▶ plano nao foi atualizado — pedindo atualizacao")
 		prompt := fmt.Sprintf("A Fase %s — %s acabou de ser implementada nesta arvore de trabalho, mas o arquivo do plano (`%s`) nao foi atualizado. Atualize-o AGORA: marque os checkboxes da fase, ajuste o dashboard (se existir) e adicione uma entrada no Registro de Andamento com data, o que foi feito, decisoes/desvios e achados uteis para as proximas fases. Nao altere codigo e nao faca commit.",
 			f.Fase, f.Titulo, cfg.Plano)
-		res, err := rodarClaude(OpcoesClaude{
+		res, err := motor.Rodar(OpcoesRun{
 			Raiz: raiz, Prompt: prompt, Modelo: modelo, AddDirs: cfg.AddDirs,
 			BudgetUSD: cfg.MaxBudgetUSD, TimeoutMin: cfg.TimeoutMin,
-			Disallowed: proibidosSempre, RotuloLog: fmt.Sprintf("fase-%s-plano", f.Fase),
+			ProibirCommit: true, RotuloLog: fmt.Sprintf("fase-%s-plano", f.Fase),
 		})
 		if err == nil && res != nil {
 			custo += res.CustoUSD
@@ -306,8 +310,11 @@ func pipelineFase(raiz string, cfg *Config, todas []*Fase, f *Fase) error {
 	}
 
 	// 5) commit local por repositorio tocado (sem push)
-	msg := fmt.Sprintf("Fase %s: %s [praxis]\n\n%s\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n",
+	msg := fmt.Sprintf("Fase %s: %s [praxis]\n\n%s\n",
 		f.Fase, f.Titulo, primeirasLinhas(strings.TrimSpace(resExec.Resultado), 15))
+	if tr := coAuthorTrailer(motor.Nome()); tr != "" {
+		msg += "\n" + tr + "\n"
+	}
 	for _, r := range repos {
 		limpo, err := gitLimpo(r)
 		if err != nil {

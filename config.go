@@ -31,6 +31,7 @@ type GateExtra struct {
 
 type Config struct {
 	Plano              string      `json:"plano"`
+	Motor              string      `json:"motor"` // claude|codex|opencode
 	Modelo             string      `json:"modelo"`
 	AddDirs            []string    `json:"add_dirs"`
 	MaxBudgetUSD       float64     `json:"max_budget_usd"`
@@ -45,6 +46,7 @@ type Config struct {
 func configPadrao() *Config {
 	return &Config{
 		Plano:              "PLANO.md",
+		Motor:              "claude",
 		Modelo:             "opus",
 		MaxBudgetUSD:       25,
 		TimeoutMin:         120,

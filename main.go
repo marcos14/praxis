@@ -23,11 +23,11 @@ independente do "claude -p" (contexto limpo):
            -> revisor (contexto limpo, veredito JSON)  -> commit local (sem push)
 
 USO:
-  praxis inicializar [--plano <arquivo.md>] [--add-dirs <d1,d2>] [--modelo <m>] [--versionar sim|nao] [--raiz <dir>]
-      Prepara um projeto: pergunta o caminho do plano do usuario, usa o Claude
-      para quebra-lo em micro-fases (cada uma executavel numa unica execucao
-      do Opus), edita o plano com a estrutura de fases e gera os arquivos de
-      acompanhamento (fases.csv + autopilot.json + prompts).
+  praxis inicializar [--plano <arquivo.md>] [--motor claude|codex|opencode] [--add-dirs <d1,d2>] [--modelo <m>] [--versionar sim|nao] [--raiz <dir>]
+      Prepara um projeto: pergunta o caminho do plano do usuario, usa o motor
+      de codigo escolhido para quebra-lo em micro-fases (cada uma executavel
+      numa unica execucao), edita o plano com a estrutura de fases e gera os
+      arquivos de acompanhamento (fases.csv + autopilot.json + prompts).
 
   praxis executar [fases] [--forcar] [--painel] [--raiz <dir>]
       Sem argumento: executa em sequencia todas as fases prontas
@@ -84,8 +84,9 @@ FLUXO TIPICO:
      descrevendo o que foi feito; nada e enviado (git push manual, apos revisao).
   5. "praxis status" para acompanhar; logs em automacao/logs/.
 
-REQUISITOS: "claude" (Claude Code CLI) logado, "git" e os toolchains dos gates
-(ex.: go, npm, python) no PATH. Rode a partir da raiz do projeto (ou use --raiz).
+REQUISITOS: o CLI do motor escolhido logado — "claude" (Claude Code),
+"codex" (OpenAI Codex) ou "opencode" (OpenCode) —, "git" e os toolchains dos
+gates (ex.: go, npm, python) no PATH. Rode a partir da raiz do projeto (ou use --raiz).
 `
 
 func main() {

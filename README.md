@@ -1,7 +1,8 @@
-# Praxis — orquestrador de fases para Claude Code
+# Praxis — orquestrador de fases para motores de código
 
 Ferramenta em **Go** que executa as fases de um plano (`.md`) uma a uma, cada
-fase numa execução independente do `claude -p` (**contexto limpo**), com:
+fase numa execução independente de um **motor de código** — Claude Code
+(padrão), Codex CLI ou OpenCode — sempre em **contexto limpo**, com:
 
 ```
 executor → gates determinísticos (build/lint/test) → corretor (se falhar)
@@ -13,7 +14,8 @@ O conhecimento entre as fases não fica em memória de sessão nenhuma: fica no
 atualiza. O controle da fila fica em `fases.csv` (editável no Excel).
 
 **Pré-requisitos na máquina que vai rodar:** [Go](https://go.dev) (só para
-compilar), `claude` (Claude Code CLI) **logado**, `git`, e os toolchains dos
+compilar), a **CLI do motor escolhido** **logada** (`claude` para Claude Code,
+`codex` para Codex CLI ou `opencode` para OpenCode), `git`, e os toolchains dos
 gates do seu projeto (ex.: `go`, `npm`, `python`) no PATH.
 
 > O arquivo de configuração continua se chamando `autopilot.json` (para não
@@ -71,14 +73,17 @@ Na **raiz do projeto** (não dentro de `automacao\`):
 
 Ele pergunta:
 - **Caminho do plano** (.md) — ex.: `PLANO.md`;
-- **Diretórios adicionais** que o Claude pode editar (outros repositórios) —
+- **Diretórios adicionais** que o motor pode editar (outros repositórios) —
   separados por vírgula, vazio se nenhum;
-- **Modelo** para executar as fases (padrão: `opus`);
+- **Modelo** para executar as fases (padrão: `opus` no Claude; nos demais
+  motores, vazio = modelo padrão da própria CLI);
 - **Versionar o estado do Praxis** (`automacao/fases.csv`) no git? (padrão:
   **sim**) — veja *Versionar o estado* abaixo.
 
-Então roda o Claude, que: lê o plano inteiro, **quebra em micro-fases** (cada
-uma executável numa única run do Opus, com testes próprios e dependências
+O **motor de código** é escolhido pela flag `--motor` (padrão: `claude`;
+aceita `codex` e `opencode`) e fica gravado em `autopilot.json` no campo
+`motor`. Então roda o motor, que: lê o plano inteiro, **quebra em micro-fases**
+(cada uma executável numa única run, com testes próprios e dependências
 explícitas), **edita o próprio .md** com a estrutura de fases + Registro de
 Andamento, e detecta os **gates** (comandos de build/lint/test da stack). No
 final você tem:
@@ -86,7 +91,7 @@ final você tem:
 | Arquivo gerado | Papel |
 |---|---|
 | `automacao/fases.csv` | Fila de fases (edite no Excel: dependências, `requer_humano`) |
-| `automacao/autopilot.json` | Config: plano, modelo, `add_dirs`, budget/timeout por run, **gates**, `versionar_automacao` |
+| `automacao/autopilot.json` | Config: plano, `motor`, modelo, `add_dirs`, budget/timeout por run, **gates**, `versionar_automacao` |
 | `automacao/prompts/*.md` | Prompts personalizáveis (executor/corretor/revisor/inicializador) |
 | `automacao/logs/` | Logs de cada execução |
 
@@ -94,7 +99,7 @@ final você tem:
 gates fazem sentido e se as fases com hardware físico/aprovação externa estão
 com `requer_humano=sim`.
 
-Modo não-interativo: `inicializar --plano PLANO.md --add-dirs "C:\projetos\outro_repo" --modelo opus --versionar sim`.
+Modo não-interativo: `inicializar --plano PLANO.md --motor claude --add-dirs "C:\projetos\outro_repo" --modelo opus --versionar sim`.
 
 ## Versionar o estado (`versionar_automacao`)
 
@@ -165,9 +170,10 @@ O painel:
   e observação — as mesmas informações do CSV.
 - Traz um **terminal embutido** que transmite (via **SSE**) o log mais recente
   de `automacao/logs/` em tempo real: segue o arquivo enquanto ele cresce e
-  troca sozinho quando começa uma nova fase/gate. As linhas do `claude`
-  (`.jsonl`) viram texto legível (mensagens e chamadas de ferramenta) e a saída
-  dos gates (`.log`) aparece como está. Tem `auto-scroll` (desmarcável).
+  troca sozinho quando começa uma nova fase/gate. As linhas dos motores
+  (`.jsonl` do Claude/Codex/OpenCode) viram texto legível (mensagens e chamadas
+  de ferramenta) e a saída dos gates (`.log`) aparece como está. Tem
+  `auto-scroll` (desmarcável).
 - Não tem dependências externas nem grava nada: é **somente leitura**. Encerre
   com **Ctrl+C**.
 
@@ -204,7 +210,7 @@ atualizando conforme as fases avançam), use `executar --painel` — veja abaixo
 | Arquivo | Papel |
 |---|---|
 | `<plano>.md` | Plano canônico: fases com checkboxes, "Depende de:" e Registro de Andamento (memória entre fases) |
-| `automacao/autopilot.json` | Config: plano, modelo, `add_dirs` (outros repos), budget/timeout, gates, `versionar_automacao` |
+| `automacao/autopilot.json` | Config: plano, `motor`, modelo, `add_dirs` (outros repos), budget/timeout, gates, `versionar_automacao` |
 | `automacao/fases.csv` | Fila (`;`): `fase;titulo;status;depende_de;requer_humano;gate_extra;modelo;tentativas;custo_usd;concluido_em;observacao` |
 | `automacao/prompts/*.md` | Prompts personalizáveis; se apagados, valem os embutidos no binário |
 | `automacao/logs/` | `.jsonl` por run do claude, log dos gates, `RESUMO-*.md` por rodada |
@@ -224,15 +230,25 @@ Um único pacote Go, sem dependências externas:
 |---|---|
 | `main.go` | CLI e ajuda |
 | `executar.go` | pipeline por fase (o coração) |
-| `inicializar.go` | quebra do plano em micro-fases via Claude |
-| `claude.go` | invocação headless do `claude -p` (stream-json, `--json-schema`) |
+| `inicializar.go` | quebra do plano em micro-fases via motor de código |
+| `motor.go` | interface `Motor` + capacidades e fallbacks (schema, custo, budget) |
+| `claude.go` | motor Claude Code: `claude -p` headless (stream-json, `--json-schema`) |
+| `codex.go` | motor Codex CLI: `codex exec --json` (schema nativo, custo estimado) |
+| `opencode.go` | motor OpenCode: `opencode run --format json` (schema via prompt) |
 | `gates.go` | gates determinísticos |
 | `fases.go` / `config.go` | fila CSV e configuração |
 | `status.go` / `painel.go` | acompanhamento no terminal e painel web |
 | `git.go` / `notificar.go` / `prompts.go` | apoio |
 | `defaults/*.md` | prompts padrão (embutidos no binário via `go:embed`) |
 
+Cada motor declara suas **capacidades** (schema nativo, budget nativo, custo
+em USD nativo) e o orquestrador decide por capacidade — nunca pelo nome do
+motor: quando o motor não suporta algo nativamente, entra o **fallback**
+equivalente (schema injetado no prompt, custo estimado por tokens, orçamento
+verificado por fase). Assim as features do pipeline valem para os três motores.
+
 Segurança embutida: pré-checagem de árvore limpa (nunca faz reset/stash);
-executor/corretor proibidos de `git commit/push`; revisor somente-leitura;
-orçamento (`max_budget_usd`) e timeout por run; gates rodados pelo orquestrador,
-nunca autorrelatados pelo modelo.
+executor/corretor proibidos de `git commit/push`; revisor somente-leitura
+(nativo em cada motor: `--disallowedTools`, `--sandbox read-only` ou
+`--agent plan`); orçamento (`max_budget_usd`) e timeout por run; gates rodados
+pelo orquestrador, nunca autorrelatados pelo modelo.

@@ -47,8 +47,9 @@ func cmdInicializar(argv []string) error {
 	fs := flag.NewFlagSet("inicializar", flag.ExitOnError)
 	raizFlag := fs.String("raiz", "", "raiz do projeto (padrao: diretorio atual)")
 	planoFlag := fs.String("plano", "", "caminho do plano .md, relativo a raiz (senao, pergunta)")
-	modeloFlag := fs.String("modelo", "", "modelo para executar as fases (padrao: opus)")
-	addDirsFlag := fs.String("add-dirs", "", "diretorios adicionais editaveis pelo Claude, separados por virgula")
+	modeloFlag := fs.String("modelo", "", "modelo para executar as fases (padrao: depende do motor)")
+	motorFlag := fs.String("motor", "", "motor de codigo: claude|codex|opencode (padrao: claude)")
+	addDirsFlag := fs.String("add-dirs", "", "diretorios adicionais editaveis pelo motor, separados por virgula")
 	versionarFlag := fs.String("versionar", "", "versionar o estado do Praxis (automacao/) no git: sim|nao (padrao: sim)")
 	fs.Parse(argv)
 	raiz := *raizFlag
@@ -90,7 +91,7 @@ func cmdInicializar(argv []string) error {
 
 	addDirsBruto := *addDirsFlag
 	if addDirsBruto == "" && *planoFlag == "" { // modo interativo
-		addDirsBruto = perguntar("Diretorios adicionais que o Claude pode editar (outros repos), separados por virgula (vazio = nenhum)", "")
+		addDirsBruto = perguntar("Diretorios adicionais que o motor pode editar (outros repos), separados por virgula (vazio = nenhum)", "")
 	}
 	var addDirs []string
 	for _, d := range strings.Split(addDirsBruto, ",") {
@@ -99,12 +100,24 @@ func cmdInicializar(argv []string) error {
 		}
 	}
 
+	motorNome := *motorFlag
+	if motorNome == "" && *planoFlag == "" {
+		motorNome = perguntar("Motor de codigo (claude|codex|opencode)", "claude")
+	}
+	if motorNome == "" {
+		motorNome = "claude"
+	}
+	motor, errSel := selecionarMotor(motorNome)
+	if errSel != nil {
+		return errSel
+	}
+
 	modelo := *modeloFlag
 	if modelo == "" && *planoFlag == "" {
-		modelo = perguntar("Modelo para executar as fases", "opus")
+		modelo = perguntar("Modelo para executar as fases (vazio = padrao do motor)", modeloPadrao(motorNome))
 	}
 	if modelo == "" {
-		modelo = "opus"
+		modelo = modeloPadrao(motorNome)
 	}
 
 	// 2) estrutura de arquivos
@@ -119,6 +132,7 @@ func cmdInicializar(argv []string) error {
 		cfg = existente // preserva ajustes (budget, timeout, gates...) em re-inicializacao
 	}
 	cfg.Plano = plano
+	cfg.Motor = motorNome
 	cfg.Modelo = modelo
 	cfg.AddDirs = addDirs
 
@@ -137,18 +151,22 @@ func cmdInicializar(argv []string) error {
 	}
 	cfg.VersionarAutomacao = versionar
 
-	// 3) o Claude analisa o plano, quebra em micro-fases (editando o .md) e
+	// 3) o motor analisa o plano, quebra em micro-fases (editando o .md) e
 	// devolve fases + gates em JSON estruturado
-	fmt.Printf("\n▶ analisando `%s` e quebrando em micro-fases (claude, modelo %s)...\n", plano, modelo)
+	modeloRotulo := modelo
+	if modeloRotulo == "" {
+		modeloRotulo = "(padrao do motor)"
+	}
+	fmt.Printf("\n▶ analisando `%s` e quebrando em micro-fases (%s, modelo %s)...\n", plano, motorNome, modeloRotulo)
 	tpl, err := carregarPrompt(raiz, "inicializador.md")
 	if err != nil {
 		return err
 	}
-	res, err := rodarClaude(OpcoesClaude{
+	res, err := motor.Rodar(OpcoesRun{
 		Raiz: raiz, Prompt: renderPrompt(tpl, map[string]string{"PLANO": plano}),
 		Modelo: modelo, AddDirs: addDirs, BudgetUSD: cfg.MaxBudgetUSD,
-		TimeoutMin: cfg.TimeoutMin, JSONSchema: schemaInit,
-		Disallowed: proibidosSempre, RotuloLog: "inicializar",
+		TimeoutMin: cfg.TimeoutMin, Schema: schemaInit,
+		ProibirCommit: true, RotuloLog: "inicializar",
 	})
 	if err != nil {
 		return err

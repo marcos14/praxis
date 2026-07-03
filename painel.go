@@ -359,30 +359,62 @@ func formatarLogLinha(caminho, linha string) (string, bool) {
 	if !strings.HasSuffix(caminho, ".jsonl") {
 		return linha, true
 	}
-	var ev eventoStream
-	if json.Unmarshal([]byte(linha), &ev) != nil {
-		return "", false
-	}
-	switch ev.Type {
-	case "assistant":
-		var partes []string
-		for _, c := range ev.Message.Content {
-			switch c.Type {
-			case "text":
-				if t := strings.TrimSpace(c.Text); t != "" {
-					partes = append(partes, t)
+	// Claude Code (stream-json)
+	var evc eventoStreamClaude
+	if json.Unmarshal([]byte(linha), &evc) == nil {
+		switch evc.Type {
+		case "assistant":
+			var partes []string
+			for _, c := range evc.Message.Content {
+				switch c.Type {
+				case "text":
+					if t := strings.TrimSpace(c.Text); t != "" {
+						partes = append(partes, t)
+					}
+				case "tool_use":
+					partes = append(partes, "→ "+c.Name)
 				}
-			case "tool_use":
-				partes = append(partes, "→ "+c.Name)
 			}
-		}
-		if len(partes) == 0 {
+			if len(partes) == 0 {
+				return "", false
+			}
+			return strings.Join(partes, "\n"), true
+		case "result":
+			if evc.TotalCostUSD > 0 {
+				return fmt.Sprintf("── run: US$ %.2f · %d turnos ──", evc.TotalCostUSD, evc.NumTurns), true
+			}
 			return "", false
 		}
-		return strings.Join(partes, "\n"), true
-	case "result":
-		if ev.TotalCostUSD > 0 {
-			return fmt.Sprintf("── run: US$ %.2f · %d turnos ──", ev.TotalCostUSD, ev.NumTurns), true
+	}
+	// Codex (codex exec --json)
+	var evx eventoCodex
+	if json.Unmarshal([]byte(linha), &evx) == nil {
+		switch evx.Type {
+		case "item.started":
+			if evx.Item.Type == "command_execution" && evx.Item.Command != "" {
+				return "→ " + primeirasLinhas(evx.Item.Command, 1), true
+			}
+		case "item.completed":
+			if evx.Item.Type == "agent_message" {
+				if t := strings.TrimSpace(evx.Item.Text); t != "" {
+					return t, true
+				}
+			}
+		case "turn.completed":
+			if evx.Usage.InputTokens+evx.Usage.OutputTokens > 0 {
+				return fmt.Sprintf("── run: %d/%d tokens ──", evx.Usage.InputTokens, evx.Usage.OutputTokens), true
+			}
+		}
+	}
+	// OpenCode (opencode run --format json)
+	var evo eventoOpencode
+	if json.Unmarshal([]byte(linha), &evo) == nil {
+		t := evo.Text
+		if t == "" {
+			t = evo.Part.Text
+		}
+		if s := strings.TrimSpace(t); s != "" {
+			return s, true
 		}
 	}
 	return "", false
