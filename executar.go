@@ -24,6 +24,8 @@ func cmdExecutar(argv []string) error {
 	fs := flag.NewFlagSet("executar", flag.ExitOnError)
 	raizFlag := fs.String("raiz", "", "raiz do projeto (padrao: deteccao automatica)")
 	forcar := fs.Bool("forcar", false, "ignora a checagem de dependencias (so no modo com fases explicitas)")
+	painel := fs.Bool("painel", false, "sobe o painel web de acompanhamento e abre o navegador")
+	portaPainel := fs.Int("porta", portaPainelPadrao, "porta HTTP do painel (com --painel)")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -36,6 +38,10 @@ func cmdExecutar(argv []string) error {
 	fases, err := carregarFases(csvPath)
 	if err != nil {
 		return err
+	}
+
+	if *painel {
+		iniciarPainel(raiz, *portaPainel, true)
 	}
 
 	var rodadas []*Fase

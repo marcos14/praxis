@@ -29,15 +29,22 @@ USO:
       do Opus), edita o plano com a estrutura de fases e gera os arquivos de
       acompanhamento (fases.csv + autopilot.json + prompts).
 
-  praxis executar [fases] [--forcar] [--raiz <dir>]
+  praxis executar [fases] [--forcar] [--painel] [--raiz <dir>]
       Sem argumento: executa em sequencia todas as fases prontas
       (status=pendente, dependencias concluidas, sem requer_humano), parando
       quando a fila acabar, uma fase falhar ou so restarem fases bloqueadas.
       Com argumento ("2d" ou "2d,2e"): executa apenas essas fases, em ordem.
       --forcar ignora a checagem de dependencias (so no modo com argumento).
+      --painel sobe o microsite de acompanhamento e abre o navegador.
 
   praxis status [--raiz <dir>]
       Mostra a fila de fases (fases.csv).
+
+  praxis painel [--porta <n>] [--abrir sim|nao] [--raiz <dir>]
+      Sobe um microsite de acompanhamento (padrao: porta 7799) que mostra as
+      fases e seus status lidos ao vivo do fases.csv. Abre o navegador
+      automaticamente e lista a URL com o IP local para acompanhar de outro
+      aparelho na mesma rede (celular/tablet).
 
   praxis ajuda | --help
       Esta ajuda.
@@ -94,6 +101,8 @@ func main() {
 		err = cmdExecutar(os.Args[2:])
 	case "status":
 		err = cmdStatus(os.Args[2:])
+	case "painel", "web":
+		err = cmdPainel(os.Args[2:])
 	case "ajuda", "help", "--help", "-h":
 		fmt.Print(ajuda)
 	case "versao", "--version", "-v":

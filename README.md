@@ -135,6 +135,40 @@ FASE  STATUS        DEPENDE DE  HUMANO  CUSTO   CONCLUIDA EM      TITULO
 - **Detalhe de cada run:** `automacao/logs/fase-*-executor-*.jsonl` (conversa
   completa), `fase-*-gates-*.log` (saída dos testes) e `RESUMO-*.md` (rodada).
 
+### Painel web (microsite)
+
+Para acompanhar visualmente — inclusive do celular/tablet na mesma rede — suba
+o painel, que lê o `fases.csv` **ao vivo** e mostra as fases, seus status, a
+barra de progresso e o custo:
+
+```powershell
+.\automacao\praxis.exe painel                 # porta 7799, abre o navegador
+.\automacao\praxis.exe painel --porta 8080     # outra porta
+.\automacao\praxis.exe painel --abrir nao      # não abrir o navegador sozinho
+```
+
+Ao subir, ele imprime a URL local e também a **URL com o IP da rede local** —
+basta abrir esse endereço no celular/tablet para acompanhar de longe:
+
+```
+📊 Painel de acompanhamento:
+   http://localhost:7799
+   http://192.168.0.42:7799  (na rede local)
+```
+
+O painel:
+
+- Atualiza sozinho a cada **3 s** (lê o `fases.csv` a cada requisição, então
+  reflete o andamento em tempo real enquanto o `executar` roda).
+- Mostra cartões de resumo por status, barra de progresso, custo total e uma
+  tabela com fase, título, status (com ícones), dependências, tentativas, custo
+  e observação — as mesmas informações do CSV.
+- Não tem dependências externas nem grava nada: é **somente leitura**. Encerre
+  com **Ctrl+C**.
+
+Para subir o painel **junto** com a execução (abre o navegador e vai
+atualizando conforme as fases avançam), use `executar --painel` — veja abaixo.
+
 ## 5. Executar
 
 ```powershell
@@ -142,6 +176,7 @@ FASE  STATUS        DEPENDE DE  HUMANO  CUSTO   CONCLUIDA EM      TITULO
 .\automacao\praxis.exe executar 2d       # só a fase 2d
 .\automacao\praxis.exe executar 2d,2e    # lote, em ordem
 .\automacao\praxis.exe executar --forcar 3c   # ignora checagem de dependências
+.\automacao\praxis.exe executar --painel      # sobe o painel web e abre o navegador
 ```
 
 - Exige **árvore git limpa** em todos os repositórios envolvidos (commite ou
@@ -153,6 +188,8 @@ FASE  STATUS        DEPENDE DE  HUMANO  CUSTO   CONCLUIDA EM      TITULO
   `logs/RESUMO-*.md`.
 - Cada fase concluída vira **um commit local** em cada repositório tocado.
   **Nunca faz `git push`** — revisar e subir é seu.
+- `--painel` (opcional, com `--porta <n>`) sobe o painel web em segundo plano e
+  abre o navegador antes de começar, atualizando conforme as fases avançam.
 - Fase que falhou: veja o motivo em `status`/`observacao` e nos logs, corrija
   (ou não) manualmente, e rode `executar <fase>` de novo — reexecutar uma fase
   explícita é permitido para status `falhou`.
@@ -186,6 +223,7 @@ Um único pacote Go, sem dependências externas:
 | `claude.go` | invocação headless do `claude -p` (stream-json, `--json-schema`) |
 | `gates.go` | gates determinísticos |
 | `fases.go` / `config.go` | fila CSV e configuração |
+| `status.go` / `painel.go` | acompanhamento no terminal e painel web |
 | `git.go` / `notificar.go` / `prompts.go` | apoio |
 | `defaults/*.md` | prompts padrão (embutidos no binário via `go:embed`) |
 
