@@ -43,8 +43,8 @@ funcionalidades importantes. Diretrizes deste plano:
 **Reaproveitar da branch:**
 - A **interface `Motor`** e o tipo genérico `OpcoesRun`/`ResultadoRun` (`motor.go`).
 - O **motor Codex** (`codex.go`): `codex exec --json`, `schemaStrictOpenAI` (adapta o
-  JSON Schema para o modo *strict* da OpenAI), estimativa de custo por tokens
-  (`custoEstimado`) e sandbox (`read-only`/`workspace-write`).
+  JSON Schema para o modo *strict* da OpenAI) e estimativa de custo por tokens
+  (`custoEstimado`).
 - Os helpers genéricos: `abrirLog`, `promptComSchema`, `decodificarEstruturado`,
   `coAuthorTrailer`.
 
@@ -353,6 +353,23 @@ flowchart TD
   `turn.failed` do `codex exec --json` (ex.: "rate limit", "usage limit", "quota",
   "429"). Sem detalhe de horário de reset, usa uma espera padrão no fallback/espera.
 
+### Permissões: bypass total (ambiente controlado) + aviso no console
+
+O Praxis roda sempre em **ambientes controlados** e headless, então cada motor usa o
+modo de acesso total, sem prompts de aprovação — como já é feito no Claude com
+`--dangerously-skip-permissions`:
+- **claude**: `--dangerously-skip-permissions` (já em uso hoje).
+- **codex**: `--dangerously-bypass-approvals-and-sandbox` (equivalente do Codex — libera
+  aprovações e sandbox de uma vez). É usado nas operações que **escrevem**
+  (executor/corretor/guarda do plano). Para o **revisor** (somente leitura), mantém-se
+  `--sandbox read-only`, que já dispensa aprovação e impede escrita — mais seguro que
+  liberar tudo onde não é preciso.
+- **Aviso no console**: no início de cada run que usa o bypass, o motor imprime um
+  aviso visível, ex.:
+  `⚠ Codex em modo BYPASS (--dangerously-bypass-approvals-and-sandbox): acesso total ao sistema, sem sandbox nem aprovação. Use apenas em ambiente controlado.`
+  (o Claude ganha um aviso análogo para o `--dangerously-skip-permissions`, deixando o
+  comportamento explícito para quem acompanha os logs).
+
 ### Custo e budget (Codex não corta custo nativamente)
 
 - **claude**: custo em USD nativo (`total_cost_usd`) e `--max-budget-usd`.
@@ -368,7 +385,7 @@ flowchart TD
 |---|---|
 | `motor.go` (novo) | Interface `Motor`, `OpcoesRun`/`ResultadoRun` (com franquia+ctx), `Capacidades`, registro de motores, helpers (`abrirLog`, `promptComSchema`, `decodificarEstruturado`, `custoEstimado`, `coAuthorTrailer`). |
 | `claude.go` | Refatorar `rodarClaude` para `motorClaude` implementando `Motor`. **Preservar** a franquia (agora emitindo `LimiteSessao` no `ResultadoRun`). |
-| `codex.go` (novo) | Portar da branch: `codex exec --json`, `schemaStrictOpenAI`, sandbox, custo por tokens, **+ detecção de limite do Codex**. |
+| `codex.go` (novo) | Portar da branch: `codex exec --json`, `schemaStrictOpenAI`, custo por tokens, **detecção de limite do Codex** e **`--dangerously-bypass-approvals-and-sandbox`** nas operações de escrita (revisor fica `--sandbox read-only`), com **aviso no console** ao iniciar o run em modo bypass. |
 | `config.go` | Adicionar structs `Motores`/`Notificacoes`/`Painel` ao `Config`; defaults; preencher/migrar blocos ausentes e **regravar**; resolução operação→motor e motor→modelo; **helper de releitura fresca** do disco. `autopilot.json` no `.gitignore`. |
 | `fallback.go` (novo) | Orquestração da execução com fallback + espera do reset (extraído/generalizado do `esperarResetFranquia` atual). Estado de "motores esgotados na rodada". |
 | `executar.go` | O `rodar` do `pipelineFase` **relê a config**, resolve o motor **por operação** e executa via `fallback.go`. Budget soft; trailer de co-autoria por motor; console indica qual motor rodou cada etapa. |
@@ -408,8 +425,12 @@ Cada fase cabe numa execução de contexto limpo e termina verde nos gates
 
 - [ ] **Fase 3 — Motor Codex.**
       Criar `codex.go` (portar da branch): `codex exec --json`, `schemaStrictOpenAI`,
-      sandbox `read-only`/`workspace-write`, `custoEstimado` por tokens e **detecção de
-      limite do Codex** (`LimiteSessao` a partir dos eventos de erro/rate-limit).
+      `custoEstimado` por tokens e **detecção de limite do Codex** (`LimiteSessao` a
+      partir dos eventos de erro/rate-limit). Usar
+      **`--dangerously-bypass-approvals-and-sandbox`** nas operações de escrita
+      (executor/corretor/guarda do plano) e `--sandbox read-only` no revisor, imprimindo
+      um **aviso no console** ao iniciar cada run em modo bypass (acesso total, ambiente
+      controlado). Adicionar o aviso análogo ao Claude (`--dangerously-skip-permissions`).
       *Depende de:* Fase 1
 
 - [ ] **Fase 4 — Config unificada no `autopilot.json`.**
