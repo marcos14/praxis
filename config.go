@@ -113,10 +113,10 @@ func configPadrao() *Config {
 		Plano:              "PLANO.md",
 		Modelo:             "opus",
 		AddDirs:            []string{},
-		MaxBudgetUSD:       25,
+		MaxBudgetUSD:       100,
 		TimeoutMin:         120,
-		MaxCorrecoes:       2,
-		MaxCiclosRevisao:   1,
+		MaxCorrecoes:       4,
+		MaxCiclosRevisao:   2,
 		VersionarAutomacao: true,
 		Gates:              []Gate{},
 		GatesExtra:         []GateExtra{},
@@ -158,6 +158,63 @@ func notificacoesPadrao() NotificacoesConfig {
 		canais[nome] = CanalNotificacao{}
 	}
 	return NotificacoesConfig{Canais: canais, Eventos: eventosPadrao()}
+}
+
+// camposCanal define quais campos cada canal expoe no autopilot.json. Diferente
+// das tags `omitempty` do struct, esses campos aparecem sempre (mesmo vazios),
+// para que a tag (ex.: `webhook_url`/`url`) fique visivel e editavel no arquivo.
+var camposCanal = map[string][]string{
+	"telegram":    {"bot_token", "chat_id"},
+	"discord":     {"webhook_url"},
+	"slack":       {"webhook_url"},
+	"google_chat": {"webhook_url"},
+	"webhook":     {"url", "header", "template"},
+}
+
+// MarshalJSON serializa os canais mostrando sempre os campos relevantes de cada
+// canal (inclusive vazios), sem poluir com campos de outros canais.
+func (n NotificacoesConfig) MarshalJSON() ([]byte, error) {
+	var canais map[string]json.RawMessage
+	if n.Canais != nil {
+		canais = make(map[string]json.RawMessage, len(n.Canais))
+		for nome, c := range n.Canais {
+			b, err := marshalCanal(nome, c)
+			if err != nil {
+				return nil, err
+			}
+			canais[nome] = b
+		}
+	}
+	aux := struct {
+		Canais  map[string]json.RawMessage `json:"canais"`
+		Eventos map[string]bool            `json:"eventos"`
+	}{Canais: canais, Eventos: n.Eventos}
+	return json.Marshal(aux)
+}
+
+func marshalCanal(nome string, c CanalNotificacao) ([]byte, error) {
+	campos, ok := camposCanal[nome]
+	if !ok {
+		// Canal desconhecido: preserva o comportamento padrao com `omitempty`.
+		type canalAlias CanalNotificacao
+		return json.Marshal(canalAlias(c))
+	}
+	valores := map[string]string{
+		"bot_token":   c.BotToken,
+		"chat_id":     c.ChatID,
+		"webhook_url": c.WebhookURL,
+		"url":         c.URL,
+		"header":      c.Header,
+		"template":    c.Template,
+	}
+	m := map[string]any{"ativo": c.Ativo}
+	for _, campo := range campos {
+		m[campo] = valores[campo]
+	}
+	if strings.TrimSpace(c.Token) != "" {
+		m["token"] = c.Token
+	}
+	return json.Marshal(m)
 }
 
 func eventosPadrao() map[string]bool {
@@ -222,16 +279,16 @@ func normalizarConfig(raiz string, cfg *Config) error {
 		cfg.Modelo = "opus"
 	}
 	if cfg.MaxBudgetUSD == 0 {
-		cfg.MaxBudgetUSD = 25
+		cfg.MaxBudgetUSD = 100
 	}
 	if cfg.TimeoutMin == 0 {
 		cfg.TimeoutMin = 120
 	}
 	if cfg.MaxCorrecoes == 0 {
-		cfg.MaxCorrecoes = 2
+		cfg.MaxCorrecoes = 4
 	}
 	if cfg.MaxCiclosRevisao == 0 {
-		cfg.MaxCiclosRevisao = 1
+		cfg.MaxCiclosRevisao = 2
 	}
 	if len(cfg.Motores.Operacoes) == 0 {
 		cfg.Motores.Operacoes = motoresPadrao(cfg.Modelo, cfg.Motor).Operacoes
