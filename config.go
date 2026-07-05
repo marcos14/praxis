@@ -26,6 +26,7 @@ type Gate struct {
 // (ex.: testes de integracao mais lentos ou que exigem setup especial).
 type GateExtra struct {
 	Nome     string   `json:"nome"`
+	Dir      string   `json:"dir,omitempty"` // relativo a raiz do projeto, ou absoluto (vazio = raiz)
 	Comandos []string `json:"comandos"`
 }
 

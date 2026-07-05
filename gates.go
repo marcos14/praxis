@@ -7,14 +7,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
 type ResultadoGates struct {
-	Ok      bool
-	LogPath string
-	Gate    string // "nome: comando" que falhou
-	Erro    string // ultimas linhas da saida do comando que falhou
+	Ok       bool
+	LogPath  string
+	Gate     string // "nome: comando" que falhou
+	Erro     string // ultimas linhas da saida do comando que falhou
+	Ambiente bool   // falha de ambiente/config (comando nao encontrado), nao do codigo
 }
 
 // rodarGates executa os comandos deterministicos de verificacao configurados
@@ -43,6 +45,7 @@ func rodarGates(raiz string, cfg *Config, f *Fase) (*ResultadoGates, error) {
 				res.Ok = false
 				res.Gate = nome + ": " + c
 				res.Erro = ultimasLinhas(string(saida), 200)
+				res.Ambiente = falhaDeAmbiente(saida, err)
 				return false
 			}
 			fmt.Println("OK")
@@ -75,11 +78,42 @@ func rodarGates(raiz string, cfg *Config, f *Fase) (*ResultadoGates, error) {
 			fmt.Printf("  AVISO: gate_extra %q nao existe no autopilot.json — ignorado\n", f.GateExtra)
 			return res, nil
 		}
-		if !rodar(extra.Nome, raiz, extra.Comandos) {
+		if !rodar(extra.Nome, resolverDir(raiz, extra.Dir), extra.Comandos) {
 			return res, nil
 		}
 	}
 	return res, nil
+}
+
+// falhaDeAmbiente detecta quando um gate falhou porque o COMANDO nao pode ser
+// executado (binario ausente, PATH errado, sintaxe incompativel com o shell) —
+// e nao porque o codigo esta reprovado. E um problema de configuracao do gate
+// ou do ambiente que o corretor (contexto limpo, sem mexer no PATH) nao
+// conserta a tempo: melhor parar e pedir intervencao humana do que gastar
+// tentativas de correcao num falso negativo.
+func falhaDeAmbiente(saida []byte, err error) bool {
+	s := strings.ToLower(string(saida))
+	marcadores := []string{
+		"não é reconhecido como um comando",                    // cmd.exe PT-BR
+		"nao e reconhecido como um comando",                    // idem, sem acento
+		"is not recognized as an internal or external command", // cmd.exe EN
+		"command not found",                                    // sh/bash
+		"não é reconhecido como nome de cmdlet",                // powershell PT-BR
+		"is not recognized as the name of a cmdlet",            // powershell EN
+	}
+	for _, m := range marcadores {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	// exit 9009 (cmd: comando nao encontrado) ou 127 (sh: idem)
+	if ee, ok := err.(*exec.ExitError); ok {
+		switch ee.ExitCode() {
+		case 127, 9009:
+			return true
+		}
+	}
+	return false
 }
 
 // execShell roda um comando via shell do sistema (cmd /c no Windows, sh -c

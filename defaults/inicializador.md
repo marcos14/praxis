@@ -16,4 +16,11 @@ Sua tarefa tem 3 partes:
 
 **3. Identifique os gates de verificação** do(s) projeto(s): os comandos determinísticos que provam que o código está saudável (build, análise estática, checagem de formatação, testes). Use os comandos que o próprio projeto já documenta. Para repositórios adicionais em outro repo, marque `somente_se_mudou=true`. Se houver verificações mais lentas ou que exigem setup especial (ex.: testes de integração), modele-as como um gate extra separado e referencie esse gate na coluna `gate_extra` apenas das fases que precisam dele.
 
+   Cada gate roda a partir de um diretório: o campo `dir` (relativo à raiz). Em **monorepos** (ex.: `backend/`, `frontend/`), aponte o `dir` para a pasta onde o comando funciona — onde está o `go.mod`, o `package.json`, etc. Isto vale **também para os gates extra** (`gates_extra` aceita `dir`): um `go test ./...` rodado na raiz de um projeto cujo módulo está em `backend/` falha com "directory prefix . does not contain main module". Deixe `dir` vazio só quando o comando realmente roda na raiz.
+
+   Os gates rodam pelo **shell do sistema operacional do orquestrador** — no Windows é o `cmd.exe`. Portanto os comandos precisam ser **portáveis**:
+   - **Não** use caminhos no estilo POSIX como `./node_modules/.bin/tsc` — o `cmd.exe` não interpreta o prefixo `./` e o gate falha com "'.' não é reconhecido como um comando". Prefira invocadores portáveis: `npx tsc`, `npm run <script>`, `go`, `python -m <mod>`, `dotnet`, etc. (que resolvem o binário pelo PATH em qualquer SO).
+   - Use apenas ferramentas que estejam no PATH (`go`, `node`/`npm`/`npx`, `python`...); não dependa de binários dentro de pastas de dependências.
+   - Evite operadores/sintaxe específicos de um shell (`&&`, `source`, aspas simples POSIX). Cada comando é uma entrada separada na lista `comandos` — não os encadeie.
+
 Sua resposta final deve ser apenas o JSON estruturado solicitado (`fases`, `gates` e, se aplicável, `gates_extra`).

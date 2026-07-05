@@ -21,7 +21,7 @@ const schemaInit = `{"type":"object","required":["fases","gates"],"properties":{
   "nome":{"type":"string"},"dir":{"type":"string"},"somente_se_mudou":{"type":"boolean"},
   "comandos":{"type":"array","items":{"type":"string"}}}}},
 "gates_extra":{"type":"array","items":{"type":"object","required":["nome","comandos"],"properties":{
-  "nome":{"type":"string"},
+  "nome":{"type":"string"},"dir":{"type":"string"},
   "comandos":{"type":"array","items":{"type":"string"}}}}}}}`
 
 type faseInit struct {

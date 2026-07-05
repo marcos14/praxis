@@ -319,6 +319,16 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 	// roda os gates; a cada vermelho, um ciclo de corretor, ate o limite
 	gatesVerdes := func() error {
 		for tent := 0; ; tent++ {
+			// recarrega a config do disco antes de cada rodada: o corretor pode
+			// ter ajustado um gate mal configurado (comando incompativel com o
+			// shell, dir errado) e essa correcao precisa valer ja agora — a cfg
+			// em memoria foi lida uma unica vez no inicio da execucao.
+			if fresh, err := carregarConfig(raiz); err == nil {
+				cfg.Gates = fresh.Gates
+				cfg.GatesExtra = fresh.GatesExtra
+			} else {
+				fmt.Printf("  AVISO: nao consegui recarregar %s (%v) — mantendo a config anterior\n", nomeConfig, err)
+			}
 			fmt.Println("▶ gates deterministicos")
 			rg, err := rodarGates(raiz, cfg, f)
 			if err != nil {
@@ -326,6 +336,13 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 			}
 			if rg.Ok {
 				return nil
+			}
+			// falha de ambiente/config (comando nao encontrado, shell incompativel):
+			// o corretor nao consegue consertar isso a tempo — para e pede
+			// intervencao humana, sem gastar (nem faturar) tentativas de correcao.
+			if rg.Ambiente {
+				return fmt.Errorf("gate [%s] nao pode ser executado — parece problema de ambiente/config (binario ausente, PATH ou sintaxe de comando incompativel com o shell), nao do codigo. Ajuste o comando em %s (ou o PATH/dependencias) e rode de novo.\nFinal da saida:\n%s\nlog: %s",
+					rg.Gate, nomeConfig, rg.Erro, rg.LogPath)
 			}
 			if tent >= cfg.MaxCorrecoes {
 				return fmt.Errorf("gates continuam vermelhos apos %d correcao(oes) — gate [%s], log: %s", tent, rg.Gate, rg.LogPath)
@@ -390,7 +407,7 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 			Raiz: raiz, Prompt: prompt, Modelo: modelo, AddDirs: cfg.AddDirs,
 			BudgetUSD: cfg.MaxBudgetUSD, TimeoutMin: cfg.TimeoutMin,
 			Disallowed: proibidosSempre, RotuloLog: fmt.Sprintf("fase-%s-plano", f.Fase),
-			Ctx:        ctx,
+			Ctx: ctx,
 		})
 		if err == nil && res != nil {
 			custo += res.CustoUSD
