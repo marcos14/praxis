@@ -659,6 +659,17 @@ func formatarLogLinha(caminho, linha string) (string, bool) {
 	if !strings.HasSuffix(caminho, ".jsonl") {
 		return linha, true
 	}
+	var tipo struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal([]byte(linha), &tipo) != nil {
+		return "", false
+	}
+	// Logs do Codex tambem sao .jsonl, mas usam outro esquema de eventos
+	// (item.*/turn.*/error); roteia para o formatador especifico.
+	if strings.HasPrefix(tipo.Type, "item.") || strings.HasPrefix(tipo.Type, "turn.") || tipo.Type == "error" {
+		return formatarLogLinhaCodex(linha)
+	}
 	var ev eventoStream
 	if json.Unmarshal([]byte(linha), &ev) != nil {
 		return "", false
@@ -683,6 +694,37 @@ func formatarLogLinha(caminho, linha string) (string, bool) {
 	case "result":
 		if ev.TotalCostUSD > 0 {
 			return fmt.Sprintf("── run: US$ %.2f · %d turnos ──", ev.TotalCostUSD, ev.NumTurns), true
+		}
+	}
+	return "", false
+}
+
+// formatarLogLinhaCodex transforma uma linha do JSONL do Codex (esquema
+// item.*/turn.*/error de `codex exec --json`) no texto exibido no terminal do
+// painel, espelhando o que o motorCodex imprime no console.
+func formatarLogLinhaCodex(linha string) (string, bool) {
+	var ev eventoCodex
+	if json.Unmarshal([]byte(linha), &ev) != nil {
+		return "", false
+	}
+	switch ev.Type {
+	case "item.started":
+		if ev.Item.Type == "command_execution" && strings.TrimSpace(ev.Item.Command) != "" {
+			return "→ " + primeirasLinhas(ev.Item.Command, 1), true
+		}
+	case "item.completed":
+		if ev.Item.Type == "agent_message" {
+			if t := strings.TrimSpace(ev.Item.Text); t != "" {
+				return t, true
+			}
+		}
+	case "turn.completed":
+		if ev.Usage.InputTokens+ev.Usage.OutputTokens > 0 {
+			return fmt.Sprintf("── turno: %d/%d tokens ──", ev.Usage.InputTokens, ev.Usage.OutputTokens), true
+		}
+	case "turn.failed", "error":
+		if msg := textoErroCodex(ev.Error); msg != "" {
+			return "⚠ " + primeirasLinhas(msg, 1), true
 		}
 	}
 	return "", false
