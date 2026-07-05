@@ -24,10 +24,12 @@ type OpcoesClaude struct {
 	AddDirs    []string
 	BudgetUSD  float64
 	TimeoutMin int
-	JSONSchema string          // se definido, força saida estruturada (--json-schema)
-	Disallowed []string        // ferramentas proibidas (--disallowedTools)
-	RotuloLog  string          // prefixo do arquivo .jsonl em automacao/logs/
-	Ctx        context.Context // contexto pai (cancelamento via Ctrl+C); nil = background
+	JSONSchema string               // se definido, força saida estruturada (--json-schema)
+	Disallowed []string             // ferramentas proibidas (--disallowedTools)
+	RotuloLog  string               // prefixo do arquivo .jsonl em automacao/logs/
+	Ctx        context.Context      // contexto pai (cancelamento via Ctrl+C); nil = background
+	PausaCh    <-chan struct{}      // sinaliza pausa (Enter) durante a espera do reset da franquia
+	OnEspera   func(detalhe string) // chamado uma vez ao comecar a esperar o reset da franquia
 }
 
 type ResultadoClaude struct {
@@ -47,6 +49,11 @@ type ResultadoClaude struct {
 // tokens acaba, antes de tentar continuar a mesma execucao. E variavel (e nao
 // const) para os testes poderem encurtar a espera.
 var esperaResetFranquia = 15 * time.Minute
+
+// errPausaSolicitada e o sentinela devolvido quando o usuario pede, no
+// terminal, para pausar a execucao (Enter durante a espera do reset da
+// franquia). Nao e uma falha: a fase fica retomavel de onde parou.
+var errPausaSolicitada = errors.New("pausa solicitada pelo usuario")
 
 // eventoStream cobre o subconjunto dos eventos stream-json que interessa.
 type eventoStream struct {
@@ -73,22 +80,38 @@ type eventoStream struct {
 // o resultado final — inclusive com is_error=true — e quem decide o que fazer
 // e o chamador.
 func rodarClaude(op OpcoesClaude) (*ResultadoClaude, error) {
+	primeiraEspera := true
 	for {
 		res, err := rodarClaudeUmaVez(op)
 		if err != nil || res == nil || !res.LimiteSessao {
 			return res, err
 		}
-		if err := esperarResetFranquia(op.Ctx, res); err != nil {
+		if primeiraEspera && op.OnEspera != nil {
+			op.OnEspera(strings.TrimSpace(res.DetalheLimite))
+		}
+		primeiraEspera = false
+		if err := esperarResetFranquia(op, res); err != nil {
 			return nil, err
 		}
 	}
 }
 
 // esperarResetFranquia dorme esperaResetFranquia respeitando o cancelamento
-// (Ctrl+C) do contexto pai; devolve erro so se a espera for interrompida.
-func esperarResetFranquia(ctx context.Context, res *ResultadoClaude) error {
+// (Ctrl+C) do contexto pai. Enquanto espera, aceita um Enter no terminal
+// (PausaCh) para pausar e continuar depois — util para trocar de conta e
+// relogar. Devolve errPausaSolicitada se o usuario pediu pausa, ou outro erro
+// se a espera foi interrompida (Ctrl+C).
+func esperarResetFranquia(op OpcoesClaude, res *ResultadoClaude) error {
+	ctx := op.Ctx
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	// descarta um eventual sinal de pausa digitado fora de uma espera
+	if op.PausaCh != nil {
+		select {
+		case <-op.PausaCh:
+		default:
+		}
 	}
 	detalhe := strings.TrimSpace(res.DetalheLimite)
 	if detalhe == "" {
@@ -96,13 +119,19 @@ func esperarResetFranquia(ctx context.Context, res *ResultadoClaude) error {
 	}
 	retomar := time.Now().Add(esperaResetFranquia)
 	fmt.Printf("\n⏳ %s\n", detalhe)
-	fmt.Printf("   Franquia de tokens esgotada — dormindo %v e retomando a mesma fase as %s (Ctrl+C aborta).\n",
+	fmt.Printf("   Franquia de tokens esgotada — durmo %v e retomo a mesma fase às %s.\n",
 		esperaResetFranquia, retomar.Format("15:04"))
+	if op.PausaCh != nil {
+		fmt.Println("   [Enter] para PAUSAR agora e continuar depois (ex.: trocar de conta e relogar); Ctrl+C aborta.")
+	}
 	t := time.NewTimer(esperaResetFranquia)
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("execucao interrompida durante a espera do reset da franquia")
+	case <-op.PausaCh:
+		fmt.Println("⏸️  pausa solicitada — encerrando para você continuar depois.")
+		return errPausaSolicitada
 	case <-t.C:
 		fmt.Println("⏳ retomando apos a espera da franquia...")
 		return nil

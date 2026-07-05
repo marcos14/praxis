@@ -88,7 +88,7 @@ const (
 func garantirGitignore(raiz string, versionar bool) error {
 	var regras []string
 	if versionar {
-		regras = []string{"/automacao/logs/", "/automacao/*.exe", "/automacao/fases-*.bak.csv"}
+		regras = []string{"/automacao/logs/", "/automacao/*.exe", "/automacao/fases-*.bak.csv", "/automacao/notificacoes.ini"}
 	} else {
 		regras = []string{"/automacao/"}
 	}

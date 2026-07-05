@@ -106,48 +106,55 @@ func cmdPainel(argv []string) error {
 		return err
 	}
 
-	ln, err := escutarPainel(*porta)
+	auth := carregarAuthPainel(raiz)
+	ln, err := escutarPainel(auth.bind, *porta)
 	if err != nil {
 		return err
 	}
 	url := fmt.Sprintf("http://localhost:%d", ln.Addr().(*net.TCPAddr).Port)
-	imprimirEnderecos(ln.Addr().(*net.TCPAddr).Port)
+	imprimirEnderecos(auth.bind, ln.Addr().(*net.TCPAddr).Port)
 	if ehSim(*abrirFlag) {
 		abrirNavegador(url)
 	}
 	fmt.Println("\nCtrl+C para encerrar o painel.")
-	return http.Serve(ln, handlerPainel(raiz, nil))
+	return http.Serve(ln, servirPainel(raiz, nil, auth))
 }
 
 // iniciarPainel sobe o painel em segundo plano (usado pelo `executar --painel`).
 // Devolve a URL local; nunca aborta a execucao — falhas sao apenas avisadas.
 // O estado da rodada (est) e compartilhado para o painel refletir uma parada.
 func iniciarPainel(raiz string, porta int, abrir bool, est *estadoExecucao) string {
-	ln, err := escutarPainel(porta)
+	auth := carregarAuthPainel(raiz)
+	ln, err := escutarPainel(auth.bind, porta)
 	if err != nil {
 		fmt.Printf("AVISO: nao consegui subir o painel: %v\n", err)
 		return ""
 	}
 	url := fmt.Sprintf("http://localhost:%d", ln.Addr().(*net.TCPAddr).Port)
-	imprimirEnderecos(ln.Addr().(*net.TCPAddr).Port)
-	go func() { _ = http.Serve(ln, handlerPainel(raiz, est)) }()
+	imprimirEnderecos(auth.bind, ln.Addr().(*net.TCPAddr).Port)
+	go func() { _ = http.Serve(ln, servirPainel(raiz, est, auth)) }()
 	if abrir {
 		abrirNavegador(url)
 	}
 	return url
 }
 
-func escutarPainel(porta int) (net.Listener, error) {
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", porta))
+func escutarPainel(bind string, porta int) (net.Listener, error) {
+	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", bind, porta))
 	if err != nil {
 		return nil, fmt.Errorf("nao consegui abrir a porta %d (ja em uso?): %w", porta, err)
 	}
 	return ln, nil
 }
 
-func imprimirEnderecos(porta int) {
+func imprimirEnderecos(bind string, porta int) {
 	fmt.Printf("\n📊 Painel de acompanhamento:\n")
 	fmt.Printf("   http://localhost:%d\n", porta)
+	// com bind restrito ao loopback, nao ha endereco de rede a anunciar
+	if bind == "127.0.0.1" || bind == "localhost" || bind == "::1" {
+		fmt.Println("   (restrito ao localhost por 'bind' — acesse de fora via túnel SSH)")
+		return
+	}
 	for _, ip := range ipsLocais() {
 		fmt.Printf("   http://%s:%d  (na rede local)\n", ip, porta)
 	}
@@ -512,6 +519,7 @@ const paginaPainel = `<!DOCTYPE html>
   .b-falhou{background:rgba(255,107,107,.15);color:var(--fail)}
   .b-bloqueada{background:rgba(255,207,91,.15);color:var(--block)}
   .b-adiada{background:rgba(197,139,255,.15);color:var(--wait)}
+  .b-pausada{background:rgba(197,139,255,.18);color:var(--wait)}
   .b-pendente{background:rgba(107,119,147,.18);color:var(--pend)}
   .fase-id{font-weight:700;color:var(--accent)}
   .muted{color:var(--muted)}
@@ -579,9 +587,9 @@ const paginaPainel = `<!DOCTYPE html>
 </main>
 <footer>Fases atualizam a cada 3 s · logs em tempo real (SSE) · Praxis</footer>
 <script>
-const ORDEM = ["executando","falhou","bloqueada","pendente","concluida","adiada"];
-const ROTULO = {concluida:"Concluídas",executando:"Executando",falhou:"Falharam",bloqueada:"Bloqueadas",adiada:"Adiadas",pendente:"Pendentes"};
-const ICONE = {concluida:"✅",executando:"🔄",falhou:"❌",bloqueada:"⏸️",adiada:"⏭️",pendente:"⬜"};
+const ORDEM = ["executando","falhou","bloqueada","pausada","pendente","concluida","adiada"];
+const ROTULO = {concluida:"Concluídas",executando:"Executando",falhou:"Falharam",bloqueada:"Bloqueadas",pausada:"Pausadas",adiada:"Adiadas",pendente:"Pendentes"};
+const ICONE = {concluida:"✅",executando:"🔄",falhou:"❌",bloqueada:"⏸️",pausada:"⏯️",adiada:"⏭️",pendente:"⬜"};
 function esc(s){return (s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
 function badge(s){return '<span class="badge b-'+esc(s)+'">'+(ICONE[s]||"")+' '+esc(s)+'</span>';}
 async function tick(){
@@ -611,6 +619,7 @@ function renderExec(ex){
     concluido:    ["ok","✅","Execução concluída"],
     falhou:       ["fail","❌","Execução parou: uma fase falhou"],
     interrompido: ["warn","⛔","Execução interrompida"],
+    pausado:      ["warn","⏯️","Execução pausada — retome com 'praxis executar'"],
     erro:         ["fail","💥","Execução abortada por erro interno"],
   };
   const m = mapa[ex.situacao] || ["warn","⚠","Execução encerrada"];
@@ -634,7 +643,7 @@ function render(d){
 
   const total = d.total||0;
   const bar = document.getElementById("bar");
-  const cor = {concluida:"var(--ok)",executando:"var(--run)",falhou:"var(--fail)",bloqueada:"var(--block)",adiada:"var(--wait)",pendente:"var(--pend)"};
+  const cor = {concluida:"var(--ok)",executando:"var(--run)",falhou:"var(--fail)",bloqueada:"var(--block)",adiada:"var(--wait)",pausada:"var(--wait)",pendente:"var(--pend)"};
   bar.innerHTML = total ? ORDEM.map(s=>{const n=res[s]||0; return n? '<span style="width:'+(n/total*100)+'%;background:'+cor[s]+'"></span>':"";}).join("") : "";
 
   const linhas = (d.fases||[]).map(f=>{

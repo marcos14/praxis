@@ -23,11 +23,13 @@ independente do "claude -p" (contexto limpo):
            -> revisor (contexto limpo, veredito JSON)  -> commit local (sem push)
 
 USO:
-  praxis inicializar [--plano <arquivo.md>] [--add-dirs <d1,d2>] [--modelo <m>] [--versionar sim|nao] [--raiz <dir>]
+  praxis inicializar [--plano <arquivo.md>] [--add-dirs <d1,d2>] [--modelo <m>] [--versionar sim|nao] [--webhook sim|nao] [--raiz <dir>]
       Prepara um projeto: pergunta o caminho do plano do usuario, usa o Claude
       para quebra-lo em micro-fases (cada uma executavel numa unica execucao
       do Opus), edita o plano com a estrutura de fases e gera os arquivos de
-      acompanhamento (fases.csv + autopilot.json + prompts).
+      acompanhamento (fases.csv + autopilot.json + prompts). Com --webhook sim,
+      cria automacao/notificacoes.ini (modelo com exemplos) para notificar por
+      Telegram/Discord/Slack/Google Chat/webhook.
 
   praxis executar [fases] [--forcar] [--painel] [--raiz <dir>]
       Sem argumento: executa em sequencia todas as fases prontas
@@ -44,7 +46,12 @@ USO:
       Sobe um microsite de acompanhamento (padrao: porta 7799) que mostra as
       fases e seus status lidos ao vivo do fases.csv. Abre o navegador
       automaticamente e lista a URL com o IP local para acompanhar de outro
-      aparelho na mesma rede (celular/tablet).
+      aparelho na mesma rede (celular/tablet). Protegido por Basic Auth quando
+      a secao [painel] do notificacoes.ini estiver ativa.
+
+  praxis auth [--user <u>] [--pass <s>]
+      Gera a credencial base64 (usuario:senha) para o Basic Auth do painel e
+      imprime o trecho pronto para colar em automacao/notificacoes.ini.
 
   praxis ajuda | --help
       Esta ajuda.
@@ -63,13 +70,20 @@ ARQUIVOS NECESSARIOS (criados pelo "inicializar", na raiz do projeto):
                              confiar no autorrelato do modelo.
   automacao/fases.csv        Fila de fases (editavel no Excel; delimitador ';').
                              Colunas: fase;titulo;status;depende_de;requer_humano;
-                             gate_extra;modelo;tentativas;custo_usd;concluido_em;observacao
-                             status: pendente|executando|concluida|falhou|bloqueada|adiada
+                             notificar;gate_extra;modelo;tentativas;custo_usd;
+                             concluido_em;observacao
+                             status: pendente|executando|concluida|falhou|bloqueada|pausada|adiada
                              depende_de: fases separadas por "+" (ex.: 2f+3e)
                              requer_humano=sim: o runner nunca executa (hardware
                              fisico, aprovacao externa); marca como bloqueada.
+                             notificar=sim: marco notificavel — dispara o webhook
+                             ao concluir, com um panorama do andamento.
                              gate_extra: nome de um gate extra do autopilot.json
                              (ex.: testes de integracao mais lentos).
+  automacao/notificacoes.ini Opcional (NAO versionado): tokens de webhook
+                             (Telegram/Discord/Slack/Google Chat/generico) e
+                             Basic Auth do painel. Criado por
+                             "inicializar --webhook sim".
   automacao/prompts/*.md     Prompts do executor/corretor/revisor/inicializador.
                              Personalizaveis; se apagados, os padroes embutidos
                              sao usados (e recriados pelo "inicializar").
@@ -103,6 +117,8 @@ func main() {
 		err = cmdStatus(os.Args[2:])
 	case "painel", "web":
 		err = cmdPainel(os.Args[2:])
+	case "auth":
+		err = cmdAuth(os.Args[2:])
 	case "ajuda", "help", "--help", "-h":
 		fmt.Print(ajuda)
 	case "versao", "--version", "-v":

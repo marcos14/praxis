@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -48,36 +50,49 @@ func cmdExecutar(argv []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// canal de pausa: um leitor de stdin transforma cada Enter num pedido de
+	// pausa, consumido durante a espera do reset da franquia. Em servidor sem
+	// terminal (stdin fechado), o leitor termina e o canal simplesmente nunca
+	// dispara — a execucao segue o fluxo automatico.
+	pausaCh := make(chan struct{}, 1)
+	go lerStdinParaPausa(pausaCh)
+	notif := carregarNotificador(raiz)
+
 	var estado *estadoExecucao
 	if *painel {
 		estado = novoEstadoExecucao()
 		iniciarPainel(raiz, *portaPainel, true, estado)
-		// Com o painel no ar, o Ctrl+C nao mata o processo de imediato: a
-		// primeira interrupcao encerra a rodada em andamento e MANTEM o painel
-		// de pe (para o usuario ver o motivo da parada); a segunda fecha tudo.
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-		go func() {
-			for s := range sig {
-				if estado.emAndamento() && ctx.Err() == nil {
-					fmt.Printf("\n⚠ %v recebido — interrompendo a rodada; o painel continua no ar (Ctrl+C de novo para fechar).\n", s)
-					estado.definir("interrompido", "interrompido pelo usuário ("+s.String()+")")
-					cancel()
-				} else {
-					fmt.Println("\nfechando o painel.")
-					os.Exit(130)
-				}
-			}
-		}()
 	}
+	// Sinais (Ctrl+C): a primeira interrupcao encerra a rodada com seguranca
+	// — a fase em andamento vira `pausada` (retomavel, sem perder o trabalho).
+	// Com o painel no ar, ele continua de pe para mostrar o motivo; uma
+	// segunda interrupcao fecha tudo.
+	var faseCorrente string
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		for s := range sig {
+			if ctx.Err() == nil {
+				fmt.Printf("\n⚠ %v recebido — encerrando a fase atual com segurança (pausada). Ctrl+C de novo força a saída.\n", s)
+				if estado != nil {
+					estado.definir("interrompido", "interrompido pelo usuário ("+s.String()+")")
+				}
+				cancel()
+			} else {
+				fmt.Println("\nsaindo.")
+				os.Exit(130)
+			}
+		}
+	}()
 
 	var rodadas []*Fase
 	var errParada error
 	motivoParada := "fila processada"
 
 	executarUma := func(f *Fase) error {
+		faseCorrente = f.Fase
 		estado.definirFase(f.Fase)
-		errFase := pipelineFase(ctx, raiz, cfg, fases, f)
+		errFase := pipelineFase(ctx, raiz, cfg, fases, f, pausaCh, notif)
 		if err := salvarFases(csvPath, fases); err != nil {
 			fmt.Printf("AVISO: nao consegui salvar %s: %v\n", csvPath, err)
 		}
@@ -159,26 +174,42 @@ func cmdExecutar(argv []string) error {
 		}
 	}()
 
-	// Interrupcao (Ctrl+C) nao e falha de execucao: reverte a fase que estava
-	// rodando para `pendente` (para poder reexecutar) e prevalece como motivo.
+	// Pausa pelo menu (Enter durante a espera da franquia): a fase ja foi
+	// marcada `pausada` no pipeline; nao e falha e a rodada para para o usuario
+	// trocar de conta / relogar e retomar depois.
+	pausadoPeloMenu := errors.Is(errParada, errPausaSolicitada)
+	if pausadoPeloMenu {
+		motivoParada = "pausado — retome com 'praxis executar' (a fase continua de onde parou)"
+		errParada = nil
+	}
+
+	// Interrupcao (Ctrl+C) tambem nao e falha: a fase que estava rodando vira
+	// `pausada` (mantendo o trabalho nao commitado) para poder ser retomada sem
+	// esbarrar na pre-checagem de arvore limpa.
 	if ctx.Err() != nil {
-		if fa := estado.info().FaseAtual; fa != "" {
-			if f := buscarFase(fases, fa); f != nil && (f.Status == StExecutando || f.Status == StFalhou) {
-				f.Status = StPendente
-				f.Observacao = "interrompido pelo usuário — reexecute quando quiser"
-				if err := salvarFases(csvPath, fases); err != nil {
-					fmt.Printf("AVISO: nao consegui salvar %s: %v\n", csvPath, err)
-				}
+		if f := buscarFase(fases, faseCorrente); f != nil &&
+			(f.Status == StExecutando || f.Status == StFalhou || f.Status == StPausada) {
+			f.Status = StPausada
+			f.Observacao = "pausada (Ctrl+C) — retome com 'praxis executar'"
+			if err := salvarFases(csvPath, fases); err != nil {
+				fmt.Printf("AVISO: nao consegui salvar %s: %v\n", csvPath, err)
 			}
 		}
 		if motivoParada == "" || errParada != nil {
-			motivoParada = "interrompido pelo usuário (Ctrl+C)"
+			motivoParada = "pausado pelo usuário (Ctrl+C) — retome com 'praxis executar'"
 		}
 		errParada = nil
 	}
 
+	pausado := pausadoPeloMenu || ctx.Err() != nil
+
 	caminhoResumo := escreverResumo(raiz, rodadas, motivoParada)
-	notificar(tituloNotificacao(rodadas, errParada), motivoParada+"\nResumo: "+caminhoResumo)
+	titulo := tituloNotificacao(rodadas, errParada)
+	if pausado {
+		titulo = "Praxis pausado — retome com 'praxis executar'"
+	}
+	notificar(titulo, motivoParada+"\nResumo: "+caminhoResumo)
+	notif.enviar(titulo, motivoParada+"\n"+resumoAndamento(fases))
 
 	// Com o painel no ar, nunca deixamos o processo morrer sozinho: finaliza o
 	// estado (que o painel mostra num banner) e segue servindo o painel ate o
@@ -186,6 +217,8 @@ func cmdExecutar(argv []string) error {
 	if estado != nil {
 		situacao := "concluido"
 		switch {
+		case pausado:
+			situacao = "pausado"
 		case ctx.Err() != nil:
 			situacao = "interrompido"
 		case errParada != nil && strings.HasPrefix(motivoParada, "erro interno (panic)"):
@@ -217,6 +250,20 @@ func tituloNotificacao(rodadas []*Fase, errParada error) string {
 	return fmt.Sprintf("Praxis terminou — %d fase(s) concluida(s)", ok)
 }
 
+// lerStdinParaPausa le linhas de stdin e, a cada Enter, sinaliza um pedido de
+// pausa (nao-bloqueante). Termina quando stdin fecha (EOF) — o que acontece em
+// servidor sem terminal interativo, caso em que a pausa manual simplesmente
+// nao fica disponivel e a execucao segue o fluxo automatico.
+func lerStdinParaPausa(ch chan<- struct{}) {
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
 func separarLista(args []string) []string {
 	var nomes []string
 	for _, a := range args {
@@ -243,21 +290,29 @@ func depsPendentes(fases []*Fase, f *Fase) []string {
 // pipelineFase executa o ciclo completo de uma fase:
 // executor -> gates (com correcoes) -> revisor (com correcao) -> guarda do
 // plano -> commit local. Devolve erro quando a fase falha (ja marcada no CSV).
-// ctx permite interromper (Ctrl+C) o run do claude em andamento.
-func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, f *Fase) error {
+// ctx permite interromper (Ctrl+C) o run do claude em andamento; pausaCh
+// habilita a pausa manual durante a espera da franquia; notif dispara os
+// avisos remotos (franquia esgotada, marcos concluidos).
+func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, f *Fase, pausaCh <-chan struct{}, notif *Notificador) error {
 	fmt.Printf("\n════════ Fase %s — %s ════════\n", f.Fase, f.Titulo)
 
-	// pre-checagem: arvores limpas em todos os repos envolvidos, ignorando os
-	// arquivos do proprio Praxis (automacao/) — churn de bookkeeping nunca
-	// deve bloquear uma fase; o que importa e o trabalho do usuario.
+	// retomada: uma fase `pausada` foi interrompida no meio e tem trabalho nao
+	// commitado que pertence a ela mesma — nesse caso NAO exigimos arvore limpa
+	// (seria bloqueada pelo proprio progresso da fase); nos demais casos a
+	// pre-checagem protege o trabalho do usuario de entrar no commit da fase.
+	retomando := f.Status == StPausada
 	repos := reposEnvolvidos(raiz, cfg)
-	for _, r := range repos {
-		limpo, err := arvoreLimpaFora(r, raiz)
-		if err != nil {
-			return err
-		}
-		if !limpo {
-			return fmt.Errorf("arvore com mudancas nao commitadas em %s — commite ou guarde (stash) antes de rodar o Praxis", r)
+	if retomando {
+		fmt.Println("↩ retomando fase pausada — mantendo o trabalho não commitado da fase")
+	} else {
+		for _, r := range repos {
+			limpo, err := arvoreLimpaFora(r, raiz)
+			if err != nil {
+				return err
+			}
+			if !limpo {
+				return fmt.Errorf("arvore com mudancas nao commitadas em %s — commite ou guarde (stash) antes de rodar o Praxis", r)
+			}
 		}
 	}
 
@@ -276,6 +331,22 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 		f.CustoUSD += custo
 		f.Observacao = primeirasLinhas(msg, 1)
 		return fmt.Errorf("fase %s falhou: %s", f.Fase, msg)
+	}
+	// pausou reconhece o pedido de pausa; pausar marca a fase como retomavel
+	// (sem falha) preservando o custo ja gasto e devolve o sentinela.
+	pausou := func(err error) bool { return errors.Is(err, errPausaSolicitada) }
+	pausar := func() error {
+		f.Status = StPausada
+		f.CustoUSD += custo
+		f.Observacao = "pausada — retome com 'praxis executar'"
+		fmt.Printf("⏸️  Fase %s pausada — retome depois com 'praxis executar' (continua de onde parou).\n", f.Fase)
+		return errPausaSolicitada
+	}
+	// onEspera dispara o aviso remoto quando a franquia de tokens esgota, para
+	// voce saber (mesmo longe do servidor) que a execucao esta esperando o reset.
+	onEspera := func(detalhe string) {
+		notif.enviar("⏳ Praxis: franquia de tokens esgotada",
+			fmt.Sprintf("Fase %s — %s\n%s\nRetomo automaticamente após o reset (ou pause no terminal para trocar de conta).", f.Fase, f.Titulo, detalhe))
 	}
 	vars := map[string]string{"FASE": f.Fase, "TITULO": f.Titulo, "PLANO": cfg.Plano}
 
@@ -296,7 +367,7 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 			AddDirs: cfg.AddDirs, BudgetUSD: cfg.MaxBudgetUSD, TimeoutMin: cfg.TimeoutMin,
 			JSONSchema: schema, Disallowed: proibidos,
 			RotuloLog: fmt.Sprintf("fase-%s-%s", f.Fase, rotulo),
-			Ctx:       ctx,
+			Ctx:       ctx, PausaCh: pausaCh, OnEspera: onEspera,
 		})
 		if res != nil {
 			custo += res.CustoUSD
@@ -359,6 +430,9 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 	fmt.Printf("▶ executor (modelo %s, contexto limpo)\n", modelo)
 	resExec, err := rodar("executor.md", "executor", nil, "", proibidosSempre)
 	if err != nil {
+		if pausou(err) {
+			return pausar()
+		}
 		return falha("executor: %v", err)
 	}
 	if resExec.IsError {
@@ -367,6 +441,9 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 
 	// 2) gates + correcoes
 	if err := gatesVerdes(); err != nil {
+		if pausou(err) {
+			return pausar()
+		}
 		return falha("%v", err)
 	}
 
@@ -375,6 +452,9 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 		fmt.Println("▶ revisor (contexto limpo, so leitura)")
 		resRev, err := rodar("revisor.md", fmt.Sprintf("revisor%d", ciclo+1), nil, schemaVeredito, proibidosRevisor)
 		if err != nil {
+			if pausou(err) {
+				return pausar()
+			}
 			return falha("revisor: %v", err)
 		}
 		var ver Veredito
@@ -391,9 +471,15 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 		}
 		motivo := "O revisor de codigo REPROVOU a entrega com os problemas:\n- " + strings.Join(ver.Problemas, "\n- ")
 		if err := corrigir(fmt.Sprintf("corretor-rev%d", ciclo+1), motivo); err != nil {
+			if pausou(err) {
+				return pausar()
+			}
 			return falha("%v", err)
 		}
 		if err := gatesVerdes(); err != nil {
+			if pausou(err) {
+				return pausar()
+			}
 			return falha("%v", err)
 		}
 	}
@@ -407,8 +493,11 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 			Raiz: raiz, Prompt: prompt, Modelo: modelo, AddDirs: cfg.AddDirs,
 			BudgetUSD: cfg.MaxBudgetUSD, TimeoutMin: cfg.TimeoutMin,
 			Disallowed: proibidosSempre, RotuloLog: fmt.Sprintf("fase-%s-plano", f.Fase),
-			Ctx: ctx,
+			Ctx: ctx, PausaCh: pausaCh, OnEspera: onEspera,
 		})
+		if pausou(err) {
+			return pausar()
+		}
 		if err == nil && res != nil {
 			custo += res.CustoUSD
 		}
@@ -437,6 +526,12 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 	f.ConcluidoEm = agoraLegivel()
 	f.Observacao = fmt.Sprintf("ok — custo US$ %.2f", custo)
 	fmt.Printf("✔ Fase %s concluida (custo US$ %.2f)\n", f.Fase, custo)
+
+	// 7) marco notificavel: avisa remotamente que a fase concluiu, com o
+	// panorama do andamento (quantas concluidas, pendentes, falhas...).
+	if f.Notificar {
+		notif.enviar(fmt.Sprintf("✅ Praxis: Fase %s — %s concluída", f.Fase, f.Titulo), resumoAndamento(todas))
+	}
 	return nil
 }
 

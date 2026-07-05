@@ -203,6 +203,43 @@ atualizando conforme as fases avançam), use `executar --painel` — veja abaixo
   11:40pm"*), o Praxis **não marca a fase como falha** — ele dorme **15 minutos**
   e retoma a mesma fase automaticamente, repetindo até o reset liberar a cota.
   Enquanto espera, imprime o horário de retomada; **Ctrl+C** aborta.
+  - **Pausar para trocar de conta:** durante a espera, aperte **Enter** para
+    **pausar** a fase (status `pausada`). O processo encerra limpo, você faz o
+    `claude` `/login` na outra conta e roda `praxis executar` de novo — ele
+    **retoma a mesma fase de onde parou**, sem esbarrar na checagem de árvore
+    limpa (o trabalho não commitado da fase é preservado). Se você não fizer
+    nada, o comportamento é o de sempre (dorme e retoma sozinho).
+  - **Ctrl+C também pausa:** interromper uma fase em andamento agora a deixa
+    `pausada` (retomável), em vez de bloquear a próxima execução por árvore suja.
+
+## Notificações remotas (webhook)
+
+Para ser avisado **de longe** quando algo pedir sua atenção (franquia esgotada,
+fase concluída, parada por erro), ative o webhook. No `inicializar`, responda
+**sim** para notificações (ou `inicializar --webhook sim`): isso cria
+`automacao/notificacoes.ini` (um modelo com exemplos comentados para
+**Telegram**, **Discord**, **Slack**, **Google Chat** e um **webhook
+genérico**). Preencha os tokens do canal que quiser e mude `ativo = sim`. O
+arquivo **nunca é versionado** (contém segredos).
+
+Eventos notificados: franquia de tokens esgotada (assim que começa a esperar o
+reset), parada da rodada (fim/erro/pausa) e **conclusão de fases marcadas como
+notificáveis** (coluna `notificar=sim` no `fases.csv`) — nesse caso o aviso traz
+o código e o título da fase mais um panorama (quantas concluídas, pendentes,
+falharam...).
+
+## Segurança do painel (Basic Auth)
+
+O painel é somente-leitura, mas transmite os logs — trate a rede com cuidado.
+Para protegê-lo com usuário/senha, gere a credencial:
+
+```powershell
+.\automacao\praxis.exe auth        # pergunta usuário e senha, imprime o base64
+```
+
+Cole o valor na seção `[painel]` do `notificacoes.ini` (`auth = sim` +
+`base64 = ...`). Opcionalmente, `bind = 127.0.0.1` restringe o painel ao próprio
+servidor (acesse de fora via túnel SSH).
 
 ## Arquivos por projeto (referência)
 
@@ -210,12 +247,13 @@ atualizando conforme as fases avançam), use `executar --painel` — veja abaixo
 |---|---|
 | `<plano>.md` | Plano canônico: fases com checkboxes, "Depende de:" e Registro de Andamento (memória entre fases) |
 | `automacao/autopilot.json` | Config: plano, modelo, `add_dirs` (outros repos), budget/timeout, gates, `versionar_automacao` |
-| `automacao/fases.csv` | Fila (`;`): `fase;titulo;status;depende_de;requer_humano;gate_extra;modelo;tentativas;custo_usd;concluido_em;observacao` |
+| `automacao/fases.csv` | Fila (`;`): `fase;titulo;status;depende_de;requer_humano;notificar;gate_extra;modelo;tentativas;custo_usd;concluido_em;observacao` |
+| `automacao/notificacoes.ini` | Opcional (não versionado): tokens de webhook e Basic Auth do painel |
 | `automacao/prompts/*.md` | Prompts personalizáveis; se apagados, valem os embutidos no binário |
 | `automacao/logs/` | `.jsonl` por run do claude, log dos gates, `RESUMO-*.md` por rodada |
 
 Estados no CSV: `pendente` · `executando` · `concluida` · `falhou` ·
-`bloqueada` (requer humano) · `adiada`. Dependências: `2f+3e`. Fases com
+`bloqueada` (requer humano) · `pausada` (interrompida; retomável) · `adiada`. Dependências: `2f+3e`. Fases com
 hardware físico/aprovação externa: `requer_humano=sim` — o runner nunca as
 executa.
 
@@ -235,6 +273,7 @@ Um único pacote Go, sem dependências externas:
 | `fases.go` / `config.go` | fila CSV e configuração |
 | `status.go` / `painel.go` | acompanhamento no terminal e painel web |
 | `git.go` / `notificar.go` / `prompts.go` | apoio |
+| `notificacoes.go` / `auth.go` | webhook (Telegram/Discord/Slack/Google Chat) e Basic Auth do painel |
 | `defaults/*.md` | prompts padrão (embutidos no binário via `go:embed`) |
 
 Segurança embutida: pré-checagem de árvore limpa (nunca faz reset/stash);

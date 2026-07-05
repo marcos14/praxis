@@ -15,6 +15,7 @@ const schemaInit = `{"type":"object","required":["fases","gates"],"properties":{
   "status":{"type":"string","enum":["pendente","concluida","adiada"]},
   "depende_de":{"type":"array","items":{"type":"string"}},
   "requer_humano":{"type":"boolean"},
+  "notificar":{"type":"boolean"},
   "gate_extra":{"type":"string"},
   "observacao":{"type":"string"}}}},
 "gates":{"type":"array","items":{"type":"object","required":["nome","dir","comandos"],"properties":{
@@ -30,6 +31,7 @@ type faseInit struct {
 	Status       string   `json:"status"`
 	DependeDe    []string `json:"depende_de"`
 	RequerHumano bool     `json:"requer_humano"`
+	Notificar    bool     `json:"notificar"`
 	GateExtra    string   `json:"gate_extra"`
 	Observacao   string   `json:"observacao"`
 }
@@ -50,6 +52,7 @@ func cmdInicializar(argv []string) error {
 	modeloFlag := fs.String("modelo", "", "modelo para executar as fases (padrao: opus)")
 	addDirsFlag := fs.String("add-dirs", "", "diretorios adicionais editaveis pelo Claude, separados por virgula")
 	versionarFlag := fs.String("versionar", "", "versionar o estado do Praxis (automacao/) no git: sim|nao (padrao: sim)")
+	webhookFlag := fs.String("webhook", "", "ativar notificacoes por webhook (cria notificacoes.ini): sim|nao")
 	fs.Parse(argv)
 	raiz := *raizFlag
 	if raiz == "" {
@@ -137,6 +140,25 @@ func cmdInicializar(argv []string) error {
 	}
 	cfg.VersionarAutomacao = versionar
 
+	// notificacoes por webhook (opcional): se ativado, geramos um
+	// notificacoes.ini modelo (com exemplos por plataforma) para o usuario
+	// preencher os tokens. O arquivo nunca e versionado (contem segredos).
+	ativarWebhook := false
+	if v := strings.TrimSpace(*webhookFlag); v != "" {
+		ativarWebhook = ehSim(v)
+	} else if *planoFlag == "" { // modo interativo
+		ativarWebhook = ehSim(perguntar("Ativar notificações por webhook (Telegram/Discord/Slack/Google Chat/genérico)? Cria um notificacoes.ini para você preencher os tokens", "nao"))
+	}
+	if ativarWebhook {
+		if criado, err := escreverNotificacoesExemplo(raiz); err != nil {
+			fmt.Printf("AVISO: nao consegui criar %s: %v\n", caminhoNotificacoes(raiz), err)
+		} else if criado {
+			fmt.Printf("  criado %s — preencha os tokens/segredos antes de executar.\n", caminhoNotificacoes(raiz))
+		} else {
+			fmt.Printf("  %s ja existe — mantido.\n", caminhoNotificacoes(raiz))
+		}
+	}
+
 	// 3) o Claude analisa o plano, quebra em micro-fases (editando o .md) e
 	// devolve fases + gates em JSON estruturado
 	fmt.Printf("\n▶ analisando `%s` e quebrando em micro-fases (claude, modelo %s)...\n", plano, modelo)
@@ -180,7 +202,7 @@ func cmdInicializar(argv []string) error {
 		}
 		fases = append(fases, &Fase{
 			Fase: fi.Fase, Titulo: fi.Titulo, Status: st, DependeDe: fi.DependeDe,
-			RequerHumano: fi.RequerHumano, GateExtra: fi.GateExtra, Observacao: fi.Observacao,
+			RequerHumano: fi.RequerHumano, Notificar: fi.Notificar, GateExtra: fi.GateExtra, Observacao: fi.Observacao,
 		})
 	}
 	if err := salvarFases(csvPath, fases); err != nil {

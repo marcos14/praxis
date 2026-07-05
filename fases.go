@@ -15,11 +15,12 @@ const (
 	StFalhou     = "falhou"
 	StBloqueada  = "bloqueada"
 	StAdiada     = "adiada"
+	StPausada    = "pausada" // em andamento, com trabalho nao commitado que pertence a ela; retomavel
 )
 
 var cabecalhoCSV = []string{
-	"fase", "titulo", "status", "depende_de", "requer_humano", "gate_extra",
-	"modelo", "tentativas", "custo_usd", "concluido_em", "observacao",
+	"fase", "titulo", "status", "depende_de", "requer_humano", "notificar",
+	"gate_extra", "modelo", "tentativas", "custo_usd", "concluido_em", "observacao",
 }
 
 type Fase struct {
@@ -28,6 +29,7 @@ type Fase struct {
 	Status       string
 	DependeDe    []string // fases separadas por '+' no CSV
 	RequerHumano bool
+	Notificar    bool // marco notificavel: dispara webhook ao concluir
 	GateExtra    string
 	Modelo       string
 	Tentativas   int
@@ -76,6 +78,7 @@ func carregarFases(caminho string) ([]*Fase, error) {
 			Status:       campo(l, "status"),
 			DependeDe:    separarDeps(campo(l, "depende_de")),
 			RequerHumano: strings.EqualFold(campo(l, "requer_humano"), "sim"),
+			Notificar:    strings.EqualFold(campo(l, "notificar"), "sim"),
 			GateExtra:    campo(l, "gate_extra"),
 			Modelo:       campo(l, "modelo"),
 			Tentativas:   tent,
@@ -107,6 +110,10 @@ func salvarFases(caminho string, fases []*Fase) error {
 		if f.RequerHumano {
 			humano = "sim"
 		}
+		notificar := "nao"
+		if f.Notificar {
+			notificar = "sim"
+		}
 		tent := ""
 		if f.Tentativas > 0 {
 			tent = strconv.Itoa(f.Tentativas)
@@ -117,7 +124,7 @@ func salvarFases(caminho string, fases []*Fase) error {
 		}
 		linha := []string{
 			f.Fase, f.Titulo, f.Status, strings.Join(f.DependeDe, "+"), humano,
-			f.GateExtra, f.Modelo, tent, custo, f.ConcluidoEm, f.Observacao,
+			notificar, f.GateExtra, f.Modelo, tent, custo, f.ConcluidoEm, f.Observacao,
 		}
 		if err := w.Write(linha); err != nil {
 			return err
@@ -155,6 +162,13 @@ func proximaPronta(fases []*Fase) (*Fase, string) {
 	for _, f := range fases {
 		if f.Status == StConcluida {
 			done[f.Fase] = true
+		}
+	}
+	// fases pausadas (interrompidas no meio) sao retomadas com prioridade:
+	// terminam o que ja comecaram antes de iniciar novas fases pendentes.
+	for _, f := range fases {
+		if f.Status == StPausada {
+			return f, ""
 		}
 	}
 	restam := false

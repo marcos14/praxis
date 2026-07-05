@@ -47,6 +47,8 @@ func iconeStatus(s string) string {
 		return "❌"
 	case StBloqueada:
 		return "⏸️"
+	case StPausada:
+		return "⏯️"
 	case StAdiada:
 		return "⏭️"
 	default:

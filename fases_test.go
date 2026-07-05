@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -13,7 +14,7 @@ func TestCSVRoundTrip(t *testing.T) {
 		{Fase: "2d", Titulo: "Campos Visiveis + Diretorio", Status: StPendente},
 		{
 			Fase: "4", Titulo: "Sync delta; incremental (a,b)", Status: StPendente,
-			DependeDe: []string{"2f", "3e"}, RequerHumano: true, GateExtra: "integration",
+			DependeDe: []string{"2f", "3e"}, RequerHumano: true, Notificar: true, GateExtra: "integration",
 			Modelo: "opus", Tentativas: 2, CustoUSD: 12.5,
 			ConcluidoEm: "2026-07-02 10:00", Observacao: "aprovacao do DBA; obrigatoria",
 		},
@@ -56,6 +57,35 @@ func TestProximaProntaRespeitaOrdemEDependencias(t *testing.T) {
 	}
 	if f.Fase != "2" {
 		t.Fatalf("esperava fase 2 (unica com deps satisfeitas), veio %s", f.Fase)
+	}
+}
+
+func TestProximaProntaRetomaPausadaComPrioridade(t *testing.T) {
+	fases := []*Fase{
+		{Fase: "1", Status: StConcluida},
+		{Fase: "2", Status: StPendente, DependeDe: []string{"1"}},
+		{Fase: "3", Status: StPausada, DependeDe: []string{"1"}},
+	}
+	f, _ := proximaPronta(fases)
+	if f == nil || f.Fase != "3" {
+		t.Fatalf("esperava retomar a fase pausada 3 antes da pendente 2, veio %v", f)
+	}
+}
+
+func TestCarregarFasesSemColunaNotificar(t *testing.T) {
+	caminho := filepath.Join(t.TempDir(), "fases.csv")
+	// CSV legado, sem a coluna notificar
+	legado := "fase;titulo;status;depende_de;requer_humano;gate_extra;modelo;tentativas;custo_usd;concluido_em;observacao\n" +
+		"1;Fase inicial;pendente;;nao;;opus;;;;\n"
+	if err := os.WriteFile(caminho, []byte(legado), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lidas, err := carregarFases(caminho)
+	if err != nil {
+		t.Fatalf("carregarFases legado: %v", err)
+	}
+	if len(lidas) != 1 || lidas[0].Notificar {
+		t.Fatalf("CSV legado deveria carregar com Notificar=false, veio %+v", lidas[0])
 	}
 }
 
