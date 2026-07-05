@@ -1,10 +1,4 @@
-// Praxis — orquestrador de fases para Claude Code.
-//
-// Executa as fases de um plano (.md) uma a uma, cada fase numa execucao
-// independente do `claude -p` (contexto limpo), com gates deterministicos
-// (build/lint/test), ciclo de correcao, revisor com veredito estruturado e
-// commit local por fase (sem push). O conhecimento entre fases fica no
-// proprio plano (Registro de Andamento).
+// Praxis: orquestrador de fases com motores de codigo intercambiaveis.
 package main
 
 import (
@@ -14,92 +8,68 @@ import (
 
 const versao = "0.1.0"
 
-const ajuda = `Praxis ` + versao + ` — orquestrador de fases para Claude Code
+const ajuda = `Praxis ` + versao + ` - orquestrador de fases
 
-Executa as fases de um plano (.md) uma a uma, cada fase numa execucao
-independente do "claude -p" (contexto limpo):
+Executa fases de um plano Markdown em contexto limpo:
 
-  executor -> gates deterministicos (build/lint/test) -> corretor (se falhar)
-           -> revisor (contexto limpo, veredito JSON)  -> commit local (sem push)
+  executor -> gates -> corretor -> revisor -> atualizacao do plano -> commit local
+
+Motores suportados: claude e codex. A escolha e feita por operacao em
+automacao/autopilot.json, que e relido antes de cada run.
 
 USO:
-  praxis inicializar [--plano <arquivo.md>] [--add-dirs <d1,d2>] [--modelo <m>] [--versionar sim|nao] [--webhook sim|nao] [--raiz <dir>]
-      Prepara um projeto: pergunta o caminho do plano do usuario, usa o Claude
-      para quebra-lo em micro-fases (cada uma executavel numa unica execucao
-      do Opus), edita o plano com a estrutura de fases e gera os arquivos de
-      acompanhamento (fases.csv + autopilot.json + prompts). Com --webhook sim,
-      cria automacao/notificacoes.ini (modelo com exemplos) para notificar por
-      Telegram/Discord/Slack/Google Chat/webhook.
+  praxis inicializar [--plano <arquivo.md>] [--add-dirs <d1,d2>] [--motor claude|codex] [--modelo <m>] [--versionar sim|nao] [--webhook sim|nao] [--raiz <dir>]
+      Prepara um projeto, quebra o plano em micro-fases e gera fases.csv,
+      autopilot.json, autopilot.exemplo.json, prompts e logs. No modo
+      interativo, lista os harnesses encontrados no PATH e pergunta qual usar.
 
-  praxis executar [fases] [--forcar] [--painel] [--raiz <dir>]
-      Sem argumento: executa em sequencia todas as fases prontas
-      (status=pendente, dependencias concluidas, sem requer_humano), parando
-      quando a fila acabar, uma fase falhar ou so restarem fases bloqueadas.
-      Com argumento ("2d" ou "2d,2e"): executa apenas essas fases, em ordem.
-      --forcar ignora a checagem de dependencias (so no modo com argumento).
-      --painel sobe o microsite de acompanhamento e abre o navegador.
+  praxis executar [fases] [--forcar] [--painel] [--porta <n>] [--raiz <dir>]
+      Executa todas as fases prontas ou apenas as fases informadas
+      ("2d" ou "2d,2e"). Usa motores.operacoes.executar/corrigir/revisar.
 
   praxis status [--raiz <dir>]
-      Mostra a fila de fases (fases.csv).
+      Mostra a fila de fases.
 
   praxis painel [--porta <n>] [--abrir sim|nao] [--raiz <dir>]
-      Sobe um microsite de acompanhamento (padrao: porta 7799) que mostra as
-      fases e seus status lidos ao vivo do fases.csv. Abre o navegador
-      automaticamente e lista a URL com o IP local para acompanhar de outro
-      aparelho na mesma rede (celular/tablet). Protegido por Basic Auth quando
-      a secao [painel] do notificacoes.ini estiver ativa.
+      Sobe o painel web com status, logs ao vivo e edicao de motores,
+      notificacoes e auth em /api/config. Edicao exige Basic Auth ativo.
 
   praxis auth [--user <u>] [--pass <s>]
-      Gera a credencial base64 (usuario:senha) para o Basic Auth do painel e
-      imprime o trecho pronto para colar em automacao/notificacoes.ini.
+      Gera a credencial base64 para colar em autopilot.json, bloco "painel".
 
-  praxis ajuda | --help
-      Esta ajuda.
+CONFIG:
+  automacao/autopilot.json e a unica fonte de verdade:
+    - motores.operacoes: planejar, executar, corrigir, revisar
+    - motores.modelos: modelo default por motor
+    - motores.esforcos: esforco default por motor (ex.: high)
+    - motores.fallback: ativo + ordem de fallback
+    - notificacoes.canais e notificacoes.eventos
+    - painel.auth_ativo, credencial_base64 e bind
 
-ARQUIVOS NECESSARIOS (criados pelo "inicializar", na raiz do projeto):
-  <plano>.md                 Plano canonico com as fases: checkboxes, "Depende
-                             de:" e um Registro de Andamento — que e a memoria
-                             compartilhada entre as fases (cada execucao le e
-                             atualiza este arquivo).
-  automacao/autopilot.json   Configuracao: caminho do plano, modelo, add_dirs
-                             (outros repositorios que o Claude pode editar),
-                             orcamento (max_budget_usd) e timeout por execucao,
-                             limites de correcao/revisao e os GATES: comandos
-                             deterministicos de verificacao (build/lint/test)
-                             que o orquestrador roda apos cada fase — sem
-                             confiar no autorrelato do modelo.
-  automacao/fases.csv        Fila de fases (editavel no Excel; delimitador ';').
-                             Colunas: fase;titulo;status;depende_de;requer_humano;
-                             notificar;gate_extra;modelo;tentativas;custo_usd;
-                             concluido_em;observacao
-                             status: pendente|executando|concluida|falhou|bloqueada|pausada|adiada
-                             depende_de: fases separadas por "+" (ex.: 2f+3e)
-                             requer_humano=sim: o runner nunca executa (hardware
-                             fisico, aprovacao externa); marca como bloqueada.
-                             notificar=sim: marco notificavel — dispara o webhook
-                             ao concluir, com um panorama do andamento.
-                             gate_extra: nome de um gate extra do autopilot.json
-                             (ex.: testes de integracao mais lentos).
-  automacao/notificacoes.ini Opcional (NAO versionado): tokens de webhook
-                             (Telegram/Discord/Slack/Google Chat/generico) e
-                             Basic Auth do painel. Criado por
-                             "inicializar --webhook sim".
-  automacao/prompts/*.md     Prompts do executor/corretor/revisor/inicializador.
-                             Personalizaveis; se apagados, os padroes embutidos
-                             sao usados (e recriados pelo "inicializar").
-  automacao/logs/            Um .jsonl por execucao do claude, logs dos gates e
-                             um RESUMO-<data>.md ao final de cada rodada.
+  Exemplo: Claude planeja/revisa e Codex executa/corrige:
+    "operacoes": {"planejar":"claude","executar":"codex","corrigir":"codex","revisar":"claude"}
+  Se quiser usar só Codex desde a inicialização:
+    praxis inicializar --motor codex
 
-FLUXO TIPICO:
-  1. Escreva (ou gere com o Claude) o plano do projeto num .md.
-  2. "praxis inicializar" -> informe o caminho do plano.
-  3. Revise automacao/fases.csv e autopilot.json (gates, dependencias, budget).
-  4. "praxis executar" e saia do computador. Cada fase vira um commit local
-     descrevendo o que foi feito; nada e enviado (git push manual, apos revisao).
-  5. "praxis status" para acompanhar; logs em automacao/logs/.
+FALLBACK:
+  Se fallback estiver ativo e um motor atingir limite de uso, o Praxis tenta o
+  proximo motor da ordem configurada. Sem fallback disponivel, espera o reset da
+  franquia, aceita Enter para pausar e Ctrl+C para interromper.
 
-REQUISITOS: "claude" (Claude Code CLI) logado, "git" e os toolchains dos gates
-(ex.: go, npm, python) no PATH. Rode a partir da raiz do projeto (ou use --raiz).
+NOTIFICACOES:
+  Eventos importantes vem ligados por padrao: inicializacao_concluida,
+  troca_de_harness, franquia_esgotada, fase_concluida, marco_concluido,
+  rodada_concluida, rodada_parou e erro_interno. Os demais podem ser ligados no
+  autopilot.json ou pelo painel.
+
+SEGREDOS:
+  autopilot.json contem tokens e credenciais, portanto e ignorado pelo git.
+  autopilot.exemplo.json nao contem segredos e pode ser versionado. O progresso
+  da fila continua em fases.csv quando versionar_automacao=true.
+
+REQUISITOS:
+  git, os toolchains dos gates e pelo menos um CLI de motor logado:
+  claude (Claude Code) e/ou codex (OpenAI Codex CLI).
 `
 
 func main() {

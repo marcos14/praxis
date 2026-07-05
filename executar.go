@@ -57,6 +57,7 @@ func cmdExecutar(argv []string) error {
 	pausaCh := make(chan struct{}, 1)
 	go lerStdinParaPausa(pausaCh)
 	notif := carregarNotificador(raiz)
+	estadoFallback := novoEstadoFallback()
 
 	var estado *estadoExecucao
 	if *painel {
@@ -92,7 +93,7 @@ func cmdExecutar(argv []string) error {
 	executarUma := func(f *Fase) error {
 		faseCorrente = f.Fase
 		estado.definirFase(f.Fase)
-		errFase := pipelineFase(ctx, raiz, cfg, fases, f, pausaCh, notif)
+		errFase := pipelineFase(ctx, raiz, cfg, fases, f, pausaCh, notif, estadoFallback)
 		if err := salvarFases(csvPath, fases); err != nil {
 			fmt.Printf("AVISO: nao consegui salvar %s: %v\n", csvPath, err)
 		}
@@ -116,6 +117,7 @@ func cmdExecutar(argv []string) error {
 				errParada = fmt.Errorf("erro interno (panic): %v", r)
 				motivoParada = fmt.Sprintf("erro interno (panic): %v\n%s", r, primeirasLinhas(string(debug.Stack()), 8))
 				fmt.Fprintf(os.Stderr, "\nPANICO capturado: %v\n", r)
+				notificarEvento(raiz, "erro_interno", "Praxis: erro interno", motivoParada)
 			}
 		}()
 
@@ -209,7 +211,11 @@ func cmdExecutar(argv []string) error {
 		titulo = "Praxis pausado — retome com 'praxis executar'"
 	}
 	notificar(titulo, motivoParada+"\nResumo: "+caminhoResumo)
-	notif.enviar(titulo, motivoParada+"\n"+resumoAndamento(fases))
+	eventoRodada := "rodada_concluida"
+	if errParada != nil || pausado {
+		eventoRodada = "rodada_parou"
+	}
+	notif.enviarEvento(eventoRodada, titulo, motivoParada+"\n"+resumoAndamento(fases))
 
 	// Com o painel no ar, nunca deixamos o processo morrer sozinho: finaliza o
 	// estado (que o painel mostra num banner) e segue servindo o painel ate o
@@ -293,7 +299,7 @@ func depsPendentes(fases []*Fase, f *Fase) []string {
 // ctx permite interromper (Ctrl+C) o run do claude em andamento; pausaCh
 // habilita a pausa manual durante a espera da franquia; notif dispara os
 // avisos remotos (franquia esgotada, marcos concluidos).
-func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, f *Fase, pausaCh <-chan struct{}, notif *Notificador) error {
+func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, f *Fase, pausaCh <-chan struct{}, notif *Notificador, estadoFallback *EstadoFallback) error {
 	fmt.Printf("\n════════ Fase %s — %s ════════\n", f.Fase, f.Titulo)
 
 	// retomada: uma fase `pausada` foi interrompida no meio e tem trabalho nao
@@ -319,12 +325,10 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 	f.Status = StExecutando
 	f.Tentativas++
 	_ = salvarFases(caminhoCSV(raiz), todas)
+	notif.enviarEvento("fase_iniciada", fmt.Sprintf("Praxis: Fase %s iniciada", f.Fase), f.Titulo)
 
-	modelo := f.Modelo
-	if modelo == "" {
-		modelo = cfg.Modelo
-	}
 	custo := 0.0
+	motorExecutor := "claude"
 	falha := func(formato string, a ...any) error {
 		msg := fmt.Sprintf(formato, a...)
 		f.Status = StFalhou
@@ -340,20 +344,27 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 		f.CustoUSD += custo
 		f.Observacao = "pausada — retome com 'praxis executar'"
 		fmt.Printf("⏸️  Fase %s pausada — retome depois com 'praxis executar' (continua de onde parou).\n", f.Fase)
+		notif.enviarEvento("pausa", fmt.Sprintf("Praxis: Fase %s pausada", f.Fase), f.Observacao)
 		return errPausaSolicitada
 	}
 	// onEspera dispara o aviso remoto quando a franquia de tokens esgota, para
 	// voce saber (mesmo longe do servidor) que a execucao esta esperando o reset.
 	onEspera := func(detalhe string) {
-		notif.enviar("⏳ Praxis: franquia de tokens esgotada",
+		notif.enviarEvento("franquia_esgotada", "Praxis: franquia de tokens esgotada",
 			fmt.Sprintf("Fase %s — %s\n%s\nRetomo automaticamente após o reset (ou pause no terminal para trocar de conta).", f.Fase, f.Titulo, detalhe))
 	}
 	vars := map[string]string{"FASE": f.Fase, "TITULO": f.Titulo, "PLANO": cfg.Plano}
 
-	rodar := func(nomePrompt, rotulo string, extras map[string]string, schema string, proibidos []string) (*ResultadoClaude, error) {
+	rodar := func(operacao, nomePrompt, rotulo string, extras map[string]string, schema string, somenteLeitura bool) (*ResultadoRun, string, error) {
+		cfgRun, err := carregarConfig(raiz)
+		if err != nil {
+			return nil, "", err
+		}
+		cfg = cfgRun
+		vars["PLANO"] = cfgRun.Plano
 		tpl, err := carregarPrompt(raiz, nomePrompt)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		valores := map[string]string{}
 		for k, v := range vars {
@@ -362,22 +373,34 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 		for k, v := range extras {
 			valores[k] = v
 		}
-		res, err := rodarClaude(OpcoesClaude{
+		motorPrimario := motorParaOperacao(cfgRun, operacao)
+		modelo := strings.TrimSpace(f.Modelo)
+		if modelo == "" {
+			modelo = modeloParaMotor(cfgRun, motorPrimario)
+		}
+		res, motorUsado, err := rodarComFallback(raiz, operacao, motorPrimario, OpcoesRun{
 			Raiz: raiz, Prompt: renderPrompt(tpl, valores), Modelo: modelo,
-			AddDirs: cfg.AddDirs, BudgetUSD: cfg.MaxBudgetUSD, TimeoutMin: cfg.TimeoutMin,
-			JSONSchema: schema, Disallowed: proibidos,
+			Esforco: esforcoParaMotor(cfgRun, motorPrimario),
+			AddDirs: cfgRun.AddDirs, BudgetUSD: cfgRun.MaxBudgetUSD, TimeoutMin: cfgRun.TimeoutMin,
+			Schema: schema, ProibirCommit: true, SomenteLeitura: somenteLeitura,
 			RotuloLog: fmt.Sprintf("fase-%s-%s", f.Fase, rotulo),
 			Ctx:       ctx, PausaCh: pausaCh, OnEspera: onEspera,
-		})
+		}, estadoFallback)
 		if res != nil {
 			custo += res.CustoUSD
+			if cfgRun.MaxBudgetUSD > 0 {
+				if m, selErr := selecionarMotor(motorUsado); selErr == nil && !m.Capacidades().BudgetNativo && custo > cfgRun.MaxBudgetUSD {
+					return res, motorUsado, fmt.Errorf("budget soft excedido para %s: custo acumulado ~US$ %.2f > limite US$ %.2f", motorUsado, custo, cfgRun.MaxBudgetUSD)
+				}
+			}
 		}
-		return res, err
+		return res, motorUsado, err
 	}
 
 	// corrige a entrega (contexto limpo) a partir de um motivo (gates/revisor)
 	corrigir := func(rotulo, motivo string) error {
-		res, err := rodar("corretor.md", rotulo, map[string]string{"MOTIVO": motivo}, "", proibidosSempre)
+		notif.enviarEvento("correcao_iniciada", fmt.Sprintf("Praxis: correcao iniciada na Fase %s", f.Fase), motivo)
+		res, _, err := rodar("corrigir", "corretor.md", rotulo, map[string]string{"MOTIVO": motivo}, "", false)
 		if err != nil {
 			return err
 		}
@@ -418,6 +441,8 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 			if tent >= cfg.MaxCorrecoes {
 				return fmt.Errorf("gates continuam vermelhos apos %d correcao(oes) — gate [%s], log: %s", tent, rg.Gate, rg.LogPath)
 			}
+			notif.enviarEvento("gates_falharam", fmt.Sprintf("Praxis: gates falharam na Fase %s", f.Fase),
+				fmt.Sprintf("Gate: %s\nLog: %s", rg.Gate, rg.LogPath))
 			fmt.Printf("▶ corretor %d/%d — gate [%s] falhou\n", tent+1, cfg.MaxCorrecoes, rg.Gate)
 			motivo := fmt.Sprintf("Os comandos de verificacao (gates) falharam.\nGate: %s\nFinal da saida:\n```\n%s\n```", rg.Gate, rg.Erro)
 			if err := corrigir(fmt.Sprintf("corretor%d", tent+1), motivo); err != nil {
@@ -427,14 +452,15 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 	}
 
 	// 1) executor — a fase em si, contexto limpo
-	fmt.Printf("▶ executor (modelo %s, contexto limpo)\n", modelo)
-	resExec, err := rodar("executor.md", "executor", nil, "", proibidosSempre)
+	fmt.Println("▶ executor (contexto limpo)")
+	resExec, motorExec, err := rodar("executar", "executor.md", "executor", nil, "", false)
 	if err != nil {
 		if pausou(err) {
 			return pausar()
 		}
 		return falha("executor: %v", err)
 	}
+	motorExecutor = motorExec
 	if resExec.IsError {
 		return falha("executor terminou com erro (%s) — log: %s", resExec.Subtipo, resExec.LogPath)
 	}
@@ -450,7 +476,7 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 	// 3) revisor (contexto limpo, so leitura) + no maximo MaxCiclosRevisao correcoes
 	for ciclo := 0; ; ciclo++ {
 		fmt.Println("▶ revisor (contexto limpo, so leitura)")
-		resRev, err := rodar("revisor.md", fmt.Sprintf("revisor%d", ciclo+1), nil, schemaVeredito, proibidosRevisor)
+		resRev, _, err := rodar("revisar", "revisor.md", fmt.Sprintf("revisor%d", ciclo+1), nil, schemaVeredito, true)
 		if err != nil {
 			if pausou(err) {
 				return pausar()
@@ -466,6 +492,7 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 			break
 		}
 		fmt.Printf("  revisor: REPROVADO\n%s\n", indentar("- "+strings.Join(ver.Problemas, "\n- "), "    "))
+		notif.enviarEvento("revisor_reprovou", fmt.Sprintf("Praxis: revisor reprovou a Fase %s", f.Fase), strings.Join(ver.Problemas, "\n"))
 		if ciclo >= cfg.MaxCiclosRevisao {
 			return falha("revisor reprovou apos %d ciclo(s) de correcao: %s", ciclo, strings.Join(ver.Problemas, " | "))
 		}
@@ -489,23 +516,41 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 		fmt.Println("▶ plano nao foi atualizado — pedindo atualizacao")
 		prompt := fmt.Sprintf("A Fase %s — %s acabou de ser implementada nesta arvore de trabalho, mas o arquivo do plano (`%s`) nao foi atualizado. Atualize-o AGORA: marque os checkboxes da fase, ajuste o dashboard (se existir) e adicione uma entrada no Registro de Andamento com data, o que foi feito, decisoes/desvios e achados uteis para as proximas fases. Nao altere codigo e nao faca commit.",
 			f.Fase, f.Titulo, cfg.Plano)
-		res, err := rodarClaude(OpcoesClaude{
-			Raiz: raiz, Prompt: prompt, Modelo: modelo, AddDirs: cfg.AddDirs,
+		cfgRun, cfgErr := carregarConfig(raiz)
+		if cfgErr == nil {
+			cfg = cfgRun
+		}
+		motorPrimario := motorParaOperacao(cfg, "executar")
+		modeloPlano := strings.TrimSpace(f.Modelo)
+		if modeloPlano == "" {
+			modeloPlano = modeloParaMotor(cfg, motorPrimario)
+		}
+		res, motorPlano, err := rodarComFallback(raiz, "executar", motorPrimario, OpcoesRun{
+			Raiz: raiz, Prompt: prompt, Modelo: modeloPlano, Esforco: esforcoParaMotor(cfg, motorPrimario), AddDirs: cfg.AddDirs,
 			BudgetUSD: cfg.MaxBudgetUSD, TimeoutMin: cfg.TimeoutMin,
-			Disallowed: proibidosSempre, RotuloLog: fmt.Sprintf("fase-%s-plano", f.Fase),
+			ProibirCommit: true, RotuloLog: fmt.Sprintf("fase-%s-plano", f.Fase),
 			Ctx: ctx, PausaCh: pausaCh, OnEspera: onEspera,
-		})
+		}, estadoFallback)
 		if pausou(err) {
 			return pausar()
 		}
 		if err == nil && res != nil {
 			custo += res.CustoUSD
+			if cfg.MaxBudgetUSD > 0 {
+				if m, selErr := selecionarMotor(motorPlano); selErr == nil && !m.Capacidades().BudgetNativo && custo > cfg.MaxBudgetUSD {
+					return falha("budget soft excedido para %s: custo acumulado ~US$ %.2f > limite US$ %.2f", motorPlano, custo, cfg.MaxBudgetUSD)
+				}
+			}
 		}
 	}
 
 	// 5) commit local por repositorio tocado (sem push)
-	msg := fmt.Sprintf("Fase %s: %s [praxis]\n\n%s\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n",
-		f.Fase, f.Titulo, primeirasLinhas(strings.TrimSpace(resExec.Resultado), 15))
+	trailer := coAuthorTrailer(motorExecutor)
+	if trailer != "" {
+		trailer = "\n\n" + trailer
+	}
+	msg := fmt.Sprintf("Fase %s: %s [praxis]\n\n%s%s\n",
+		f.Fase, f.Titulo, primeirasLinhas(strings.TrimSpace(resExec.Resultado), 15), trailer)
 	for _, r := range repos {
 		limpo, err := gitLimpo(r)
 		if err != nil {
@@ -526,11 +571,12 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 	f.ConcluidoEm = agoraLegivel()
 	f.Observacao = fmt.Sprintf("ok — custo US$ %.2f", custo)
 	fmt.Printf("✔ Fase %s concluida (custo US$ %.2f)\n", f.Fase, custo)
+	notif.enviarEvento("fase_concluida", fmt.Sprintf("Praxis: Fase %s concluida", f.Fase), resumoAndamento(todas))
 
 	// 7) marco notificavel: avisa remotamente que a fase concluiu, com o
 	// panorama do andamento (quantas concluidas, pendentes, falhas...).
 	if f.Notificar {
-		notif.enviar(fmt.Sprintf("✅ Praxis: Fase %s — %s concluída", f.Fase, f.Titulo), resumoAndamento(todas))
+		notif.enviarEvento("marco_concluido", fmt.Sprintf("Praxis: Fase %s — %s concluida", f.Fase, f.Titulo), resumoAndamento(todas))
 	}
 	return nil
 }

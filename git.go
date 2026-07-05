@@ -81,14 +81,14 @@ const (
 )
 
 // garantirGitignore mantem, na raiz do projeto, um bloco de .gitignore
-// gerenciado pelo Praxis. Versionando: ignora so o transitorio (logs, exe,
-// backups), deixando fases.csv/autopilot.json/prompts rastreados. Sem
+// gerenciado pelo Praxis. Versionando: ignora so segredos/transitorios (config
+// real, logs, exe, backups), deixando fases.csv/prompts/exemplo rastreados. Sem
 // versionar: ignora a pasta automacao/ inteira e para de rastrear o que ja
 // estava versionado nela.
 func garantirGitignore(raiz string, versionar bool) error {
 	var regras []string
 	if versionar {
-		regras = []string{"/automacao/logs/", "/automacao/*.exe", "/automacao/fases-*.bak.csv", "/automacao/notificacoes.ini"}
+		regras = []string{"/automacao/autopilot.json", "/automacao/logs/", "/automacao/*.exe", "/automacao/fases-*.bak.csv", "/automacao/notificacoes.ini", "/automacao/notificacoes.ini.bak"}
 	} else {
 		regras = []string{"/automacao/"}
 	}

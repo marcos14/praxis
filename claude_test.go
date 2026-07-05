@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -42,13 +45,53 @@ func TestDecodificarEstruturadoSemJSON(t *testing.T) {
 
 func TestParseEventoResult(t *testing.T) {
 	linha := `{"type":"result","subtype":"success","is_error":false,"result":"tudo certo","total_cost_usd":3.21,"num_turns":17,"structured_output":{"veredito":"APROVADO","problemas":[]}}`
-	var ev eventoStream
+	var ev eventoStreamClaude
 	if err := json.Unmarshal([]byte(linha), &ev); err != nil {
 		t.Fatal(err)
 	}
 	if ev.Type != "result" || ev.IsError || ev.Result != "tudo certo" ||
 		ev.TotalCostUSD != 3.21 || ev.NumTurns != 17 || len(ev.StructuredOutput) == 0 {
 		t.Fatalf("evento result mal parseado: %+v", ev)
+	}
+}
+
+func TestLimiteSessaoClaude(t *testing.T) {
+	texto := "You've hit your session limit · resets 11:40pm"
+	if !limiteSessaoAtingido(texto) {
+		t.Fatalf("esperava detectar limite em %q", texto)
+	}
+	if got := linhaLimite("prefixo\n" + texto + "\nrodape"); got != texto {
+		t.Fatalf("linha limite: %q", got)
+	}
+	if limiteSessaoAtingido("rate limit sem informacao de reset") {
+		t.Fatal("nao deveria detectar limite sem reset")
+	}
+}
+
+func TestMotorClaudeDetectaLimiteNoStderrSemResultado(t *testing.T) {
+	dir := t.TempDir()
+	nome := "claude"
+	conteudo := "#!/bin/sh\necho \"You've hit your session limit - resets 11:40pm\" >&2\nexit 1\n"
+	if runtime.GOOS == "windows" {
+		nome = "claude.bat"
+		conteudo = "@echo off\r\necho You've hit your session limit - resets 11:40pm 1>&2\r\nexit /b 1\r\n"
+	}
+	caminho := filepath.Join(dir, nome)
+	if err := os.WriteFile(caminho, []byte(conteudo), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	raiz := t.TempDir()
+	res, err := motorClaude{}.Rodar(OpcoesRun{Raiz: raiz, Prompt: "teste", RotuloLog: "limite", TimeoutMin: 1})
+	if err != nil {
+		t.Fatalf("nao esperava erro, esperava ResultadoRun com limite: %v", err)
+	}
+	if res == nil || !res.LimiteSessao {
+		t.Fatalf("limite nao detectado: %+v", res)
+	}
+	if res.DetalheLimite == "" {
+		t.Fatalf("detalhe do limite deveria ser preenchido: %+v", res)
 	}
 }
 

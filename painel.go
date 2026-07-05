@@ -176,8 +176,226 @@ func handlerPainel(raiz string, est *estadoExecucao) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(resp)
 	})
+	mux.HandleFunc("/api/config", handlerConfigPainel(raiz))
 	mux.HandleFunc("/api/logs", handlerLogs(raiz))
 	return mux
+}
+
+const mascaraSegredo = "********"
+
+type painelConfigPayload struct {
+	Editavel           bool               `json:"editavel"`
+	Motores            MotoresConfig      `json:"motores"`
+	Notificacoes       NotificacoesConfig `json:"notificacoes"`
+	Painel             PainelConfig       `json:"painel"`
+	MotoresDisponiveis []string           `json:"motores_disponiveis,omitempty"`
+	OperacoesValidas   []string           `json:"operacoes_validas,omitempty"`
+	EventosConhecidos  []string           `json:"eventos_conhecidos,omitempty"`
+	CanaisConhecidos   []string           `json:"canais_conhecidos,omitempty"`
+}
+
+func handlerConfigPainel(raiz string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			cfg, err := carregarConfig(raiz)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			ok, ativo, semCred := painelRequestAutorizado(raiz, r)
+			resp := payloadConfigPainel(cfg, ativo && ok && !semCred)
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			_ = json.NewEncoder(w).Encode(resp)
+		case http.MethodPost:
+			ok, ativo, semCred := painelRequestAutorizado(raiz, r)
+			if !ativo || semCred || !ok {
+				http.Error(w, "edicao de config exige Basic Auth ativo", http.StatusForbidden)
+				return
+			}
+			var req painelConfigPayload
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "JSON invalido: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			cfg, err := carregarConfig(raiz)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := aplicarPayloadConfig(cfg, req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := salvarConfig(raiz, cfg); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			resp := payloadConfigPainel(cfg, true)
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_ = json.NewEncoder(w).Encode(resp)
+		default:
+			http.Error(w, "metodo nao permitido", http.StatusMethodNotAllowed)
+		}
+	}
+}
+
+func payloadConfigPainel(cfg *Config, editavel bool) painelConfigPayload {
+	cp := clonarConfig(cfg)
+	mascararSegredos(&cp.Notificacoes, &cp.Painel)
+	return painelConfigPayload{
+		Editavel:           editavel,
+		Motores:            cp.Motores,
+		Notificacoes:       cp.Notificacoes,
+		Painel:             cp.Painel,
+		MotoresDisponiveis: motoresConhecidos(),
+		OperacoesValidas:   append([]string(nil), operacoesValidas...),
+		EventosConhecidos:  eventosConhecidos(),
+		CanaisConhecidos:   []string{"telegram", "discord", "slack", "google_chat", "webhook"},
+	}
+}
+
+func mascararSegredos(n *NotificacoesConfig, p *PainelConfig) {
+	for nome, c := range n.Canais {
+		c.BotToken = mascararSePreenchido(c.BotToken)
+		c.Token = mascararSePreenchido(c.Token)
+		c.ChatID = mascararSePreenchido(c.ChatID)
+		c.WebhookURL = mascararSePreenchido(c.WebhookURL)
+		c.URL = mascararSePreenchido(c.URL)
+		c.Template = mascararSePreenchido(c.Template)
+		c.Header = mascararSePreenchido(c.Header)
+		n.Canais[nome] = c
+	}
+	p.CredencialBase64 = mascararSePreenchido(p.CredencialBase64)
+}
+
+func mascararSePreenchido(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return ""
+	}
+	return mascaraSegredo
+}
+
+func aplicarPayloadConfig(cfg *Config, req painelConfigPayload) error {
+	if req.Motores.Operacoes != nil {
+		ops := map[string]string{}
+		for _, op := range operacoesValidas {
+			m := normalizarNomeMotor(req.Motores.Operacoes[op])
+			if m == "" {
+				m = motorParaOperacao(cfg, op)
+			}
+			if _, err := selecionarMotor(m); err != nil {
+				return fmt.Errorf("motor invalido para %s: %w", op, err)
+			}
+			ops[op] = m
+		}
+		for op := range req.Motores.Operacoes {
+			if !operacaoValida(op) {
+				return fmt.Errorf("operacao invalida: %s", op)
+			}
+		}
+		cfg.Motores.Operacoes = ops
+	}
+	if req.Motores.Modelos != nil {
+		modelos := map[string]string{}
+		for motor, modelo := range req.Motores.Modelos {
+			motor = normalizarNomeMotor(motor)
+			if _, err := selecionarMotor(motor); err != nil {
+				return fmt.Errorf("modelo configurado para motor desconhecido %q", motor)
+			}
+			modelos[motor] = strings.TrimSpace(modelo)
+		}
+		if len(modelos) > 0 {
+			cfg.Motores.Modelos = modelos
+			if modeloClaude := strings.TrimSpace(modelos["claude"]); modeloClaude != "" {
+				cfg.Modelo = modeloClaude
+			}
+		}
+	}
+	if req.Motores.Esforcos != nil {
+		esforcos := map[string]string{}
+		for motor, esforco := range req.Motores.Esforcos {
+			motor = normalizarNomeMotor(motor)
+			if _, err := selecionarMotor(motor); err != nil {
+				return fmt.Errorf("esforco configurado para motor desconhecido %q", motor)
+			}
+			esforco = strings.ToLower(strings.TrimSpace(esforco))
+			if !esforcoValidoParaMotor(motor, esforco) {
+				return fmt.Errorf("esforco invalido para %s: %q", motor, esforco)
+			}
+			esforcos[motor] = esforco
+		}
+		if len(esforcos) > 0 {
+			cfg.Motores.Esforcos = esforcos
+		}
+	}
+	if req.Motores.Fallback.Ordem != nil {
+		var ordem []string
+		for _, motor := range req.Motores.Fallback.Ordem {
+			motor = normalizarNomeMotor(motor)
+			if motor == "" {
+				continue
+			}
+			if _, err := selecionarMotor(motor); err != nil {
+				return fmt.Errorf("motor invalido no fallback: %w", err)
+			}
+			ordem = append(ordem, motor)
+		}
+		if len(ordem) == 0 {
+			return fmt.Errorf("fallback.ordem nao pode ficar vazia")
+		}
+		cfg.Motores.Fallback.Ordem = ordem
+	}
+	cfg.Motores.Fallback.Ativo = req.Motores.Fallback.Ativo
+
+	if req.Notificacoes.Canais != nil {
+		canais := cfg.Notificacoes.Canais
+		if canais == nil {
+			canais = notificacoesPadrao().Canais
+		}
+		conhecidos := map[string]bool{"telegram": true, "discord": true, "slack": true, "google_chat": true, "webhook": true}
+		for nome, canalReq := range req.Notificacoes.Canais {
+			if !conhecidos[nome] {
+				return fmt.Errorf("canal invalido: %s", nome)
+			}
+			atual := canais[nome]
+			canalReq.BotToken = preservarMascara(canalReq.BotToken, atual.BotToken)
+			canalReq.Token = preservarMascara(canalReq.Token, atual.Token)
+			canalReq.ChatID = preservarMascara(canalReq.ChatID, atual.ChatID)
+			canalReq.WebhookURL = preservarMascara(canalReq.WebhookURL, atual.WebhookURL)
+			canalReq.URL = preservarMascara(canalReq.URL, atual.URL)
+			canalReq.Template = preservarMascara(canalReq.Template, atual.Template)
+			canalReq.Header = preservarMascara(canalReq.Header, atual.Header)
+			canais[nome] = canalReq
+		}
+		cfg.Notificacoes.Canais = canais
+	}
+	if req.Notificacoes.Eventos != nil {
+		eventos := eventosPadrao()
+		conhecidos := map[string]bool{}
+		for _, ev := range catalogoEventos {
+			conhecidos[ev.Chave] = true
+		}
+		for chave, ligado := range req.Notificacoes.Eventos {
+			if !conhecidos[chave] {
+				return fmt.Errorf("evento invalido: %s", chave)
+			}
+			eventos[chave] = ligado
+		}
+		cfg.Notificacoes.Eventos = eventos
+	}
+	cfg.Painel.AuthAtivo = req.Painel.AuthAtivo
+	cfg.Painel.Bind = strings.TrimSpace(req.Painel.Bind)
+	cfg.Painel.CredencialBase64 = preservarMascara(req.Painel.CredencialBase64, cfg.Painel.CredencialBase64)
+	return validarConfigMotores(cfg)
+}
+
+func preservarMascara(recebido, atual string) string {
+	if recebido == mascaraSegredo {
+		return atual
+	}
+	return strings.TrimSpace(recebido)
 }
 
 type painelFase struct {
@@ -549,6 +767,19 @@ const paginaPainel = `<!DOCTYPE html>
   .term .l-tool{color:#5b8cff}
   .term .l-cost{color:#3ecf8e}
   .term .l-sys{color:#8b98b8}
+  .cfg-wrap{margin-top:24px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .cfg-head{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+  .cfg-head h2{font-size:15px;margin:0}
+  .cfg-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+  .cfg-row{display:flex;align-items:center;justify-content:space-between;gap:10px;border-top:1px solid var(--line);padding:8px 0}
+  .cfg-row:first-child{border-top:none}
+  .cfg-row label{font-size:12px;color:var(--muted)}
+  .cfg-row input,.cfg-row select{width:145px;background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px}
+  .cfg-row input[type=checkbox]{width:auto}
+  .cfg-actions{display:flex;gap:10px;align-items:center;margin-top:12px}
+  .cfg-actions button{background:var(--accent);color:white;border:0;border-radius:6px;padding:8px 12px;cursor:pointer}
+  .cfg-actions button:disabled{background:var(--line);cursor:not-allowed}
+  .cfg-note{font-size:12px;color:var(--muted)}
   @media(max-width:640px){.hide-sm{display:none}}
 </style>
 </head>
@@ -575,6 +806,10 @@ const paginaPainel = `<!DOCTYPE html>
     </tr></thead>
     <tbody id="linhas"></tbody>
   </table>
+  <section class="cfg-wrap">
+    <div class="cfg-head"><h2>Configuração</h2><span id="cfg-state" class="cfg-note"></span></div>
+    <div id="cfg"></div>
+  </section>
   <section class="term-wrap">
     <div class="term-head">
       <span class="term-dots"><i></i><i></i><i></i></span>
@@ -665,6 +900,96 @@ function render(d){
 }
 tick();
 setInterval(tick, 3000);
+
+let CFG = null;
+function opt(v, cur){ return '<option value="'+esc(v)+'" '+(v===cur?'selected':'')+'>'+esc(v)+'</option>'; }
+function dis(){ return CFG && CFG.editavel ? '' : 'disabled'; }
+function row(label, html){ return '<div class="cfg-row"><label>'+esc(label)+'</label>'+html+'</div>'; }
+async function carregarCfg(){
+  try{
+    const r = await fetch("/api/config",{cache:"no-store"});
+    CFG = await r.json();
+    renderCfg();
+  }catch(e){
+    document.getElementById("cfg").innerHTML = '<div class="err">Falha ao carregar configuração</div>';
+  }
+}
+function renderCfg(){
+  const d = CFG;
+  const motores = d.motores_disponiveis || [];
+  const ops = d.operacoes_validas || [];
+  const evs = d.eventos_conhecidos || [];
+  document.getElementById("cfg-state").textContent = d.editavel ? "editável" : "somente leitura";
+  let h = '<div class="cfg-grid">';
+  h += '<div><b>Motores</b>';
+  for(const op of ops){
+    const cur = (d.motores.operacoes||{})[op] || "claude";
+    h += row(op, '<select id="cfg-op-'+op+'" '+dis()+'>'+motores.map(m=>opt(m,cur)).join("")+'</select>');
+  }
+  for(const m of motores){
+    const val = ((d.motores.modelos||{})[m] || "");
+    h += row("modelo "+m, '<input id="cfg-model-'+m+'" value="'+esc(val)+'" '+dis()+'>');
+  }
+  for(const m of motores){
+    const cur = ((d.motores.esforcos||{})[m] || "");
+    const esforcos = m==="claude" ? ["","low","medium","high","xhigh","max"] : ["","low","medium","high"];
+    h += row("esforco "+m, '<select id="cfg-effort-'+m+'" '+dis()+'>'+esforcos.map(e=>opt(e,cur)).join("")+'</select>');
+  }
+  const ordem = ((d.motores.fallback||{}).ordem||[]).join(",");
+  h += row("fallback", '<input type="checkbox" id="cfg-fb" '+((d.motores.fallback||{}).ativo?'checked':'')+' '+dis()+'>');
+  h += row("ordem", '<input id="cfg-fb-ordem" value="'+esc(ordem)+'" '+dis()+'>');
+  h += '</div><div><b>Notificações</b>';
+  const canais = d.notificacoes.canais || {};
+  h += canalUI("telegram", canais.telegram || {}, ["bot_token","chat_id"]);
+  h += canalUI("discord", canais.discord || {}, ["webhook_url"]);
+  h += canalUI("slack", canais.slack || {}, ["webhook_url"]);
+  h += canalUI("google_chat", canais.google_chat || {}, ["webhook_url"]);
+  h += canalUI("webhook", canais.webhook || {}, ["url","header","template"]);
+  h += '</div><div><b>Eventos</b>';
+  for(const ev of evs){
+    h += row(ev, '<input type="checkbox" id="cfg-ev-'+ev+'" '+((d.notificacoes.eventos||{})[ev]?'checked':'')+' '+dis()+'>');
+  }
+  h += '</div><div><b>Painel</b>';
+  h += row("auth", '<input type="checkbox" id="cfg-auth" '+((d.painel||{}).auth_ativo?'checked':'')+' '+dis()+'>');
+  h += row("credencial", '<input id="cfg-cred" value="'+esc((d.painel||{}).credencial_base64||"")+'" '+dis()+'>');
+  h += row("bind", '<input id="cfg-bind" value="'+esc((d.painel||{}).bind||"")+'" '+dis()+'>');
+  h += '</div></div><div class="cfg-actions"><button id="cfg-save" '+dis()+' onclick="salvarCfg()">Salvar</button><span id="cfg-msg" class="cfg-note"></span></div>';
+  document.getElementById("cfg").innerHTML = h;
+}
+function canalUI(nome, c, campos){
+  let h = '<div style="margin-top:10px"><span class="tag">'+esc(nome)+'</span>';
+  h += row(nome+" ativo", '<input type="checkbox" id="cfg-ch-'+nome+'-ativo" '+(c.ativo?'checked':'')+' '+dis()+'>');
+  for(const campo of campos){
+    h += row(campo, '<input id="cfg-ch-'+nome+'-'+campo+'" value="'+esc(c[campo]||"")+'" '+dis()+'>');
+  }
+  return h + '</div>';
+}
+function val(id){ const el=document.getElementById(id); return el ? el.value : ""; }
+function chk(id){ const el=document.getElementById(id); return !!(el && el.checked); }
+async function salvarCfg(){
+  const d = CFG;
+  const motores = {operacoes:{}, modelos:{}, esforcos:{}, fallback:{ativo:chk("cfg-fb"), ordem:val("cfg-fb-ordem").split(",").map(s=>s.trim()).filter(Boolean)}};
+  for(const op of d.operacoes_validas||[]) motores.operacoes[op] = val("cfg-op-"+op);
+  for(const m of d.motores_disponiveis||[]) motores.modelos[m] = val("cfg-model-"+m);
+  for(const m of d.motores_disponiveis||[]) motores.esforcos[m] = val("cfg-effort-"+m);
+  const canais = {
+    telegram:{ativo:chk("cfg-ch-telegram-ativo"), bot_token:val("cfg-ch-telegram-bot_token"), chat_id:val("cfg-ch-telegram-chat_id")},
+    discord:{ativo:chk("cfg-ch-discord-ativo"), webhook_url:val("cfg-ch-discord-webhook_url")},
+    slack:{ativo:chk("cfg-ch-slack-ativo"), webhook_url:val("cfg-ch-slack-webhook_url")},
+    google_chat:{ativo:chk("cfg-ch-google_chat-ativo"), webhook_url:val("cfg-ch-google_chat-webhook_url")},
+    webhook:{ativo:chk("cfg-ch-webhook-ativo"), url:val("cfg-ch-webhook-url"), header:val("cfg-ch-webhook-header"), template:val("cfg-ch-webhook-template")}
+  };
+  const eventos = {};
+  for(const ev of d.eventos_conhecidos||[]) eventos[ev] = chk("cfg-ev-"+ev);
+  const payload = {motores:motores, notificacoes:{canais:canais,eventos:eventos}, painel:{auth_ativo:chk("cfg-auth"), credencial_base64:val("cfg-cred"), bind:val("cfg-bind")}};
+  document.getElementById("cfg-msg").textContent = "salvando...";
+  const r = await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+  if(!r.ok){ document.getElementById("cfg-msg").textContent = await r.text(); return; }
+  CFG = await r.json();
+  document.getElementById("cfg-msg").textContent = "salvo";
+  renderCfg();
+}
+carregarCfg();
 
 // --- terminal de logs ao vivo (SSE) ---
 const termEl = document.getElementById("term");

@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func TestParseINI(t *testing.T) {
 	texto := `
@@ -34,7 +38,12 @@ webhook_url = https://discord.com/api/webhooks/x
 }
 
 func TestNotificadorDesabilitadoQuandoVazio(t *testing.T) {
-	n := &Notificador{ini: parseINI("")}
+	raiz := t.TempDir()
+	cfg := configPadrao()
+	if err := salvarConfig(raiz, cfg); err != nil {
+		t.Fatal(err)
+	}
+	n := carregarNotificador(raiz)
 	if n.habilitado() {
 		t.Fatal("sem canais ativos, o notificador deveria estar desabilitado")
 	}
@@ -43,9 +52,56 @@ func TestNotificadorDesabilitadoQuandoVazio(t *testing.T) {
 }
 
 func TestNotificadorHabilitadoComGoogleChat(t *testing.T) {
-	n := &Notificador{ini: parseINI("[google_chat]\nativo = sim\nwebhook_url = https://chat.googleapis.com/v1/spaces/x/messages?key=k&token=t\n")}
+	raiz := t.TempDir()
+	cfg := configPadrao()
+	c := cfg.Notificacoes.Canais["google_chat"]
+	c.Ativo = true
+	c.WebhookURL = "https://chat.googleapis.com/v1/spaces/x/messages?key=k&token=t"
+	cfg.Notificacoes.Canais["google_chat"] = c
+	if err := salvarConfig(raiz, cfg); err != nil {
+		t.Fatal(err)
+	}
+	n := carregarNotificador(raiz)
 	if !n.habilitado() {
 		t.Fatal("google_chat ativo deveria habilitar o notificador")
+	}
+}
+
+func TestEventoLigadoDefaults(t *testing.T) {
+	n := notificacoesPadrao()
+	if !eventoLigado(n, "rodada_concluida") {
+		t.Fatal("rodada_concluida deveria vir ligado")
+	}
+	if eventoLigado(n, "fase_iniciada") {
+		t.Fatal("fase_iniciada deveria vir desligado")
+	}
+}
+
+func TestNotificarEventoRespeitaCanalEEvento(t *testing.T) {
+	chamadas := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		chamadas++
+	}))
+	defer srv.Close()
+
+	raiz := t.TempDir()
+	cfg := configPadrao()
+	wh := cfg.Notificacoes.Canais["webhook"]
+	wh.Ativo = true
+	wh.URL = srv.URL
+	cfg.Notificacoes.Canais["webhook"] = wh
+	cfg.Notificacoes.Eventos["fase_iniciada"] = false
+	cfg.Notificacoes.Eventos["fase_concluida"] = true
+	if err := salvarConfig(raiz, cfg); err != nil {
+		t.Fatal(err)
+	}
+	notificarEvento(raiz, "fase_iniciada", "titulo", "corpo")
+	if chamadas != 0 {
+		t.Fatalf("evento desligado nao deveria chamar webhook, chamou %d", chamadas)
+	}
+	notificarEvento(raiz, "fase_concluida", "titulo", "corpo")
+	if chamadas != 1 {
+		t.Fatalf("evento ligado deveria chamar webhook 1x, chamou %d", chamadas)
 	}
 }
 

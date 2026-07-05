@@ -75,67 +75,111 @@ func (ini iniArquivo) ativa(secao string) bool {
 }
 
 // Notificador envia avisos remotos (Telegram/Discord/Slack/Google Chat/webhook
-// generico) lidos do notificacoes.ini. E best-effort: falhas nunca derrubam a
-// rodada. Os metodos sao seguros em receptor nil (quando o arquivo nao existe).
+// generico) lidos do autopilot.json a cada uso. E best-effort: falhas nunca
+// derrubam a rodada.
 type Notificador struct {
-	ini iniArquivo
-	cli *http.Client
+	raiz string
+	cli  *http.Client
 }
 
-// carregarNotificador le o notificacoes.ini (se existir). Devolve um
-// Notificador sempre utilizavel; se o arquivo faltar ou nenhum canal estiver
-// ativo, habilitado() e false e enviar() vira no-op.
+// carregarNotificador devolve um Notificador sempre utilizavel; a config e
+// relida do disco no momento do envio.
 func carregarNotificador(raiz string) *Notificador {
-	ini, err := lerINI(caminhoNotificacoes(raiz))
-	if err != nil {
-		ini = iniArquivo{}
-	}
-	return &Notificador{ini: ini, cli: &http.Client{Timeout: 10 * time.Second}}
+	return &Notificador{raiz: raiz, cli: &http.Client{Timeout: 10 * time.Second}}
 }
 
 func (n *Notificador) habilitado() bool {
-	if n == nil || n.ini == nil {
+	cfg, ok := n.config()
+	if !ok {
 		return false
 	}
-	return n.ini.ativa("telegram") || n.ini.ativa("discord") ||
-		n.ini.ativa("slack") || n.ini.ativa("google_chat") || n.ini.ativa("webhook")
+	return algumCanalAtivo(cfg.Notificacoes)
 }
 
-// enviar dispara o aviso para todos os canais ativos. Best-effort.
+// enviar preserva a chamada antiga, sem filtrar por evento. Novos pontos do
+// pipeline devem preferir enviarEvento/notificarEvento.
 func (n *Notificador) enviar(titulo, corpo string) {
-	if !n.habilitado() {
+	cfg, ok := n.config()
+	if !ok || !algumCanalAtivo(cfg.Notificacoes) {
 		return
 	}
+	n.enviarComConfig(cfg, titulo, corpo)
+}
+
+func (n *Notificador) enviarEvento(chave, titulo, corpo string) {
+	cfg, ok := n.config()
+	if !ok || !eventoLigado(cfg.Notificacoes, chave) || !algumCanalAtivo(cfg.Notificacoes) {
+		return
+	}
+	n.enviarComConfig(cfg, titulo, corpo)
+}
+
+func notificarEvento(raiz, chave, titulo, corpo string) {
+	carregarNotificador(raiz).enviarEvento(chave, titulo, corpo)
+}
+
+func (n *Notificador) config() (*Config, bool) {
+	if n == nil {
+		return nil, false
+	}
+	cfg, err := carregarConfig(n.raiz)
+	if err != nil {
+		return nil, false
+	}
+	return cfg, true
+}
+
+func (n *Notificador) enviarComConfig(cfg *Config, titulo, corpo string) {
 	texto := strings.TrimSpace(titulo)
 	if c := strings.TrimSpace(corpo); c != "" {
 		texto += "\n" + c
 	}
-	if n.ini.ativa("telegram") {
-		n.enviarTelegram(texto)
+	canais := cfg.Notificacoes.Canais
+	if c := canais["telegram"]; c.Ativo {
+		n.enviarTelegram(c, texto)
 	}
-	if n.ini.ativa("discord") {
-		n.postJSON(n.ini.get("discord", "webhook_url"), map[string]string{"content": texto}, "")
+	if c := canais["discord"]; c.Ativo {
+		n.postJSON(c.WebhookURL, map[string]string{"content": texto}, "")
 	}
-	if n.ini.ativa("slack") {
-		n.postJSON(n.ini.get("slack", "webhook_url"), map[string]string{"text": texto}, "")
+	if c := canais["slack"]; c.Ativo {
+		n.postJSON(c.WebhookURL, map[string]string{"text": texto}, "")
 	}
-	if n.ini.ativa("google_chat") {
-		n.postJSON(n.ini.get("google_chat", "webhook_url"), map[string]string{"text": texto}, "")
+	if c := canais["google_chat"]; c.Ativo {
+		n.postJSON(c.WebhookURL, map[string]string{"text": texto}, "")
 	}
-	if n.ini.ativa("webhook") {
-		n.postJSON(n.ini.get("webhook", "url"),
-			map[string]string{"titulo": titulo, "texto": corpo}, n.ini.get("webhook", "header"))
+	if c := canais["webhook"]; c.Ativo {
+		n.postJSON(c.URL, map[string]string{"titulo": titulo, "texto": corpo}, c.Header)
 	}
 }
 
-func (n *Notificador) enviarTelegram(texto string) {
-	token := n.ini.get("telegram", "token")
-	chat := n.ini.get("telegram", "chat_id")
+func (n *Notificador) enviarTelegram(c CanalNotificacao, texto string) {
+	token := firstNonEmpty(c.BotToken, c.Token)
+	chat := c.ChatID
 	if token == "" || chat == "" {
 		return
 	}
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
 	n.postJSON(url, map[string]string{"chat_id": chat, "text": texto}, "")
+}
+
+func algumCanalAtivo(n NotificacoesConfig) bool {
+	for _, c := range n.Canais {
+		if c.Ativo {
+			return true
+		}
+	}
+	return false
+}
+
+func eventoLigado(n NotificacoesConfig, chave string) bool {
+	if n.Eventos == nil {
+		return eventosPadrao()[chave]
+	}
+	v, ok := n.Eventos[chave]
+	if !ok {
+		return eventosPadrao()[chave]
+	}
+	return v
 }
 
 // postJSON faz um POST best-effort com corpo JSON e um cabecalho opcional no

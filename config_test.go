@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -26,6 +27,102 @@ func TestConfigRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfg, lida) {
 		t.Fatalf("round-trip divergente:\noriginal: %+v\nlida:     %+v", cfg, lida)
+	}
+}
+
+func TestCarregarConfigPreencheBlocosNovos(t *testing.T) {
+	raiz := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(raiz, dirAutomacao), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bruto := `{"plano":"PLANO.md","modelo":"sonnet","max_budget_usd":25,"timeout_min":120,"max_correcoes":2,"max_ciclos_revisao":1,"versionar_automacao":true,"gates":[]}`
+	if err := os.WriteFile(caminhoConfig(raiz), []byte(bruto), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := carregarConfig(raiz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := motorParaOperacao(cfg, "executar"); got != "claude" {
+		t.Fatalf("motor executar: %q", got)
+	}
+	if got := modeloParaMotor(cfg, "claude"); got != "sonnet" {
+		t.Fatalf("modelo claude deveria respeitar legado: %q", got)
+	}
+	if got := modeloParaMotor(cfg, "codex"); got != "gpt-5.5" {
+		t.Fatalf("modelo codex default inesperado: %q", got)
+	}
+	if got := esforcoParaMotor(cfg, "claude"); got != "high" {
+		t.Fatalf("esforco claude default inesperado: %q", got)
+	}
+	if got := esforcoParaMotor(cfg, "codex"); got != "high" {
+		t.Fatalf("esforco codex default inesperado: %q", got)
+	}
+	if !cfg.Notificacoes.Eventos["rodada_concluida"] || cfg.Notificacoes.Eventos["fase_iniciada"] {
+		t.Fatalf("defaults de eventos inesperados: %+v", cfg.Notificacoes.Eventos)
+	}
+	if _, err := os.Stat(caminhoConfigExemplo(raiz)); err != nil {
+		t.Fatalf("autopilot.exemplo.json deveria ser gerado: %v", err)
+	}
+}
+
+func TestCarregarConfigMigraNotificacoesINI(t *testing.T) {
+	raiz := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(raiz, dirAutomacao), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := salvarConfig(raiz, configPadrao()); err != nil {
+		t.Fatal(err)
+	}
+	cfg := configPadrao()
+	cfg.Notificacoes = NotificacoesConfig{}
+	b, _ := json.Marshal(cfg)
+	if err := os.WriteFile(caminhoConfig(raiz), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ini := "[telegram]\nativo=sim\ntoken=123\nchat_id=42\n[painel]\nauth=sim\nbase64=abc\nbind=127.0.0.1\n"
+	if err := os.WriteFile(caminhoNotificacoes(raiz), []byte(ini), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lida, err := carregarConfig(raiz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tg := lida.Notificacoes.Canais["telegram"]
+	if !tg.Ativo || tg.BotToken != "123" || tg.ChatID != "42" {
+		t.Fatalf("telegram nao migrado: %+v", tg)
+	}
+	if !lida.Painel.AuthAtivo || lida.Painel.CredencialBase64 != "abc" || lida.Painel.Bind != "127.0.0.1" {
+		t.Fatalf("painel nao migrado: %+v", lida.Painel)
+	}
+	if _, err := os.Stat(caminhoNotificacoes(raiz) + ".bak"); err != nil {
+		t.Fatalf("ini legado deveria virar .bak: %v", err)
+	}
+}
+
+func TestCarregarConfigReleituraFresca(t *testing.T) {
+	raiz := t.TempDir()
+	cfg := configPadrao()
+	if err := salvarConfig(raiz, cfg); err != nil {
+		t.Fatal(err)
+	}
+	primeira, err := carregarConfig(raiz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if primeira.Motores.Operacoes["executar"] != "claude" {
+		t.Fatalf("default inesperado: %+v", primeira.Motores.Operacoes)
+	}
+	cfg.Motores.Operacoes["executar"] = "codex"
+	if err := salvarConfig(raiz, cfg); err != nil {
+		t.Fatal(err)
+	}
+	segunda, err := carregarConfig(raiz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := segunda.Motores.Operacoes["executar"]; got != "codex" {
+		t.Fatalf("releitura nao refletiu mudanca no disco: %q", got)
 	}
 }
 

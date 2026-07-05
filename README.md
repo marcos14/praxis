@@ -1,282 +1,248 @@
-# Praxis — orquestrador de fases para Claude Code
+# Praxis
 
-Ferramenta em **Go** que executa as fases de um plano (`.md`) uma a uma, cada
-fase numa execução independente do `claude -p` (**contexto limpo**), com:
+Praxis e um orquestrador de fases para planos de desenvolvimento. Ele executa
+uma fila em `automacao/fases.csv`, roda cada etapa em um harness de codigo
+headless, valida com gates deterministicos e faz commits locais por fase.
 
+Fluxo por fase:
+
+```text
+executor -> gates (build/lint/test) -> corretor (se falhar)
+         -> revisor (veredito JSON) -> atualizacao do plano -> commit local
 ```
-executor → gates determinísticos (build/lint/test) → corretor (se falhar)
-        → revisor (contexto limpo, veredito JSON)   → commit local (sem push)
-```
 
-O conhecimento entre as fases não fica em memória de sessão nenhuma: fica no
-**próprio plano** (seção *Registro de Andamento*), que cada execução lê e
-atualiza. O controle da fila fica em `fases.csv` (editável no Excel).
+O conhecimento entre fases fica no proprio plano Markdown, na secao
+`Registro de Andamento`. Cada run recebe contexto limpo e reler arquivos e
+configuracao do disco.
 
-**Pré-requisitos na máquina que vai rodar:** [Go](https://go.dev) (só para
-compilar), `claude` (Claude Code CLI) **logado**, `git`, e os toolchains dos
-gates do seu projeto (ex.: `go`, `npm`, `python`) no PATH.
+## Requisitos
 
-> O arquivo de configuração continua se chamando `autopilot.json` (para não
-> quebrar projetos já inicializados). O que mudou foi o nome da ferramenta e do
-> binário: **Praxis / `praxis.exe`**.
+- `git`
+- Toolchains dos gates do projeto (`go`, `npm`, `python`, `dotnet`, etc.)
+- Pelo menos um motor configurado e logado:
+  - `claude` para Claude Code
+  - `codex` para OpenAI Codex CLI
+- Go apenas para compilar o Praxis.
 
----
-
-## 1. Compilar
+## Compilar
 
 ```powershell
-cd praxis             # pasta com o código-fonte
 go build -o praxis.exe .
-go test ./...         # opcional: testes unitários
+go test ./...
 ```
 
-Isso gera o `praxis.exe` (autossuficiente: os prompts padrão vão **embutidos**
-no binário — não precisa carregar mais nada junto).
+## Inicializar um projeto
 
-Para compilar para outra plataforma (ex.: um servidor Linux):
-
-```powershell
-$env:GOOS='linux'; go build -o praxis .; Remove-Item env:GOOS
-```
-
-## 2. Instalar num projeto novo
-
-1. **Copie apenas o `praxis.exe`** para a pasta `automacao\` do projeto que vai
-   receber o plano (crie a pasta):
-
-   ```powershell
-   mkdir C:\projetos\meu_projeto\automacao
-   copy praxis.exe C:\projetos\meu_projeto\automacao\
-   ```
-
-   (Opcional: copie também a pasta `defaults\` renomeada para `prompts\` se
-   quiser personalizar os prompts antes do primeiro uso — senão o
-   `inicializar` cria `automacao\prompts\` sozinho com os padrões.)
-
-2. **Tenha um plano** `.md` na raiz do projeto (ex.: `PLANO.md`) descrevendo o
-   que precisa ser feito. Pode ser um plano "cru" — o próximo passo quebra ele
-   em fases do tamanho certo.
-
-O `.gitignore` do projeto **é gerenciado pelo `inicializar`** (bloco entre
-marcadores `# >>> praxis ... >>>`), conforme sua resposta sobre versionar o
-estado — veja abaixo. Não precisa editar à mão.
-
-## 3. Inicializar (uma vez por projeto)
-
-Na **raiz do projeto** (não dentro de `automacao\`):
+Copie o binario para `automacao/` do projeto e rode na raiz:
 
 ```powershell
 .\automacao\praxis.exe inicializar
 ```
 
-Ele pergunta:
-- **Caminho do plano** (.md) — ex.: `PLANO.md`;
-- **Diretórios adicionais** que o Claude pode editar (outros repositórios) —
-  separados por vírgula, vazio se nenhum;
-- **Modelo** para executar as fases (padrão: `opus`);
-- **Versionar o estado do Praxis** (`automacao/fases.csv`) no git? (padrão:
-  **sim**) — veja *Versionar o estado* abaixo.
+No modo interativo, o Praxis lista os harnesses encontrados no `PATH` (`claude`,
+`codex`) e pergunta qual usar na inicializacao. O modelo fica no default do
+harness; depois voce pode editar `motores.modelos` no `autopilot.json`.
 
-Então roda o Claude, que: lê o plano inteiro, **quebra em micro-fases** (cada
-uma executável numa única run do Opus, com testes próprios e dependências
-explícitas), **edita o próprio .md** com a estrutura de fases + Registro de
-Andamento, e detecta os **gates** (comandos de build/lint/test da stack). No
-final você tem:
-
-| Arquivo gerado | Papel |
-|---|---|
-| `automacao/fases.csv` | Fila de fases (edite no Excel: dependências, `requer_humano`) |
-| `automacao/autopilot.json` | Config: plano, modelo, `add_dirs`, budget/timeout por run, **gates**, `versionar_automacao` |
-| `automacao/prompts/*.md` | Prompts personalizáveis (executor/corretor/revisor/inicializador) |
-| `automacao/logs/` | Logs de cada execução |
-
-**Revise `fases.csv` e `autopilot.json` antes de executar** — confira se os
-gates fazem sentido e se as fases com hardware físico/aprovação externa estão
-com `requer_humano=sim`.
-
-Modo não-interativo: `inicializar --plano PLANO.md --add-dirs "C:\projetos\outro_repo" --modelo opus --versionar sim`.
-
-## Versionar o estado (`versionar_automacao`)
-
-O `fases.csv` é a memória da fila. Escolha na inicialização se ele entra no git:
-
-- **`sim` (padrão, recomendado):** `fases.csv`, `autopilot.json` e os prompts
-  ficam **versionados**. O status de conclusão de uma fase é gravado *depois*
-  do commit da fase, então o Praxis faz um **commit de bookkeeping por fase**
-  (`chore(praxis): estado apos Fase N [concluida]`). Assim o progresso fica no
-  histórico e a árvore volta limpa — em projetos grandes você não perde de vista
-  o que já rodou. O `.gitignore` gerenciado ignora só o transitório
-  (`logs/`, `*.exe`, `fases-*.bak.csv`).
-- **`nao`:** a pasta `automacao/` **inteira** entra no `.gitignore` e para de
-  ser rastreada (`git rm --cached`). O estado vira puramente local — o registro
-  canônico de progresso passa a ser só o *Registro de Andamento* do plano.
-
-Independentemente da escolha, a **pré-checagem de árvore limpa ignora tudo sob
-`automacao/`**: churn de bookkeeping do próprio Praxis nunca bloqueia a próxima
-fase (só o trabalho do usuário bloqueia).
-
-## 4. Acompanhar — até onde foi, o que falta
-
-```powershell
-.\automacao\praxis.exe status
-```
-
-```
-FASE  STATUS        DEPENDE DE  HUMANO  CUSTO   CONCLUIDA EM      TITULO
-2c    ✅ concluida  2+3b                $12.30  2026-07-02 15:10  Tabelas de preco...
-2d    ⬜ pendente   1                                             Campos Visiveis...
-4     ⏸️ bloqueada  2f+3e       sim                               Sync delta...
-```
-
-- **Fonte da verdade da fila:** `automacao/fases.csv` (pode editar no Excel —
-  ex.: voltar uma fase `falhou` para `pendente` depois de resolver a causa).
-- **O que foi feito em cada fase:** seção *Registro de Andamento* do plano `.md`
-  + o commit `Fase N: ... [praxis]` de cada fase.
-- **Detalhe de cada run:** `automacao/logs/fase-*-executor-*.jsonl` (conversa
-  completa), `fase-*-gates-*.log` (saída dos testes) e `RESUMO-*.md` (rodada).
-
-### Painel web (microsite)
-
-Para acompanhar visualmente — inclusive do celular/tablet na mesma rede — suba
-o painel, que lê o `fases.csv` **ao vivo** e mostra as fases, seus status, a
-barra de progresso e o custo:
-
-```powershell
-.\automacao\praxis.exe painel                 # porta 7799, abre o navegador
-.\automacao\praxis.exe painel --porta 8080     # outra porta
-.\automacao\praxis.exe painel --abrir nao      # não abrir o navegador sozinho
-```
-
-Ao subir, ele imprime a URL local e também a **URL com o IP da rede local** —
-basta abrir esse endereço no celular/tablet para acompanhar de longe:
-
-```
-📊 Painel de acompanhamento:
-   http://localhost:7799
-   http://192.168.0.42:7799  (na rede local)
-```
-
-O painel:
-
-- Atualiza sozinho a cada **3 s** (lê o `fases.csv` a cada requisição, então
-  reflete o andamento em tempo real enquanto o `executar` roda).
-- Mostra cartões de resumo por status, barra de progresso, custo total e uma
-  tabela com fase, título, status (com ícones), dependências, tentativas, custo
-  e observação — as mesmas informações do CSV.
-- Traz um **terminal embutido** que transmite (via **SSE**) o log mais recente
-  de `automacao/logs/` em tempo real: segue o arquivo enquanto ele cresce e
-  troca sozinho quando começa uma nova fase/gate. As linhas do `claude`
-  (`.jsonl`) viram texto legível (mensagens e chamadas de ferramenta) e a saída
-  dos gates (`.log`) aparece como está. Tem `auto-scroll` (desmarcável).
-- Não tem dependências externas nem grava nada: é **somente leitura**. Encerre
-  com **Ctrl+C**.
-
-Para subir o painel **junto** com a execução (abre o navegador e vai
-atualizando conforme as fases avançam), use `executar --painel` — veja abaixo.
-
-## 5. Executar
-
-```powershell
-.\automacao\praxis.exe executar          # tudo que estiver pronto, em sequência
-.\automacao\praxis.exe executar 2d       # só a fase 2d
-.\automacao\praxis.exe executar 2d,2e    # lote, em ordem
-.\automacao\praxis.exe executar --forcar 3c   # ignora checagem de dependências
-.\automacao\praxis.exe executar --painel      # sobe o painel web e abre o navegador
-```
-
-- Exige **árvore git limpa** em todos os repositórios envolvidos (commite ou
-  guarde seu WIP antes) — é a garantia de que cada commit contém só a fase. Os
-  arquivos do próprio Praxis (`automacao/`) são desconsiderados nessa checagem.
-- No modo sequência, para sozinho quando: a fila acaba, uma fase **falha**
-  (gates vermelhos após as correções, ou revisor reprova 2x) ou só restam fases
-  `requer_humano`/bloqueadas. Ao parar: banner + toast do Windows +
-  `logs/RESUMO-*.md`.
-- Cada fase concluída vira **um commit local** em cada repositório tocado.
-  **Nunca faz `git push`** — revisar e subir é seu.
-- `--painel` (opcional, com `--porta <n>`) sobe o painel web em segundo plano e
-  abre o navegador antes de começar, atualizando conforme as fases avançam.
-- Fase que falhou: veja o motivo em `status`/`observacao` e nos logs, corrija
-  (ou não) manualmente, e rode `executar <fase>` de novo — reexecutar uma fase
-  explícita é permitido para status `falhou`.
-- **Franquia de tokens esgotada:** se o `claude` interromper um run porque o
-  limite de sessão foi atingido (ex.: *"You've hit your session limit · resets
-  11:40pm"*), o Praxis **não marca a fase como falha** — ele dorme **15 minutos**
-  e retoma a mesma fase automaticamente, repetindo até o reset liberar a cota.
-  Enquanto espera, imprime o horário de retomada; **Ctrl+C** aborta.
-  - **Pausar para trocar de conta:** durante a espera, aperte **Enter** para
-    **pausar** a fase (status `pausada`). O processo encerra limpo, você faz o
-    `claude` `/login` na outra conta e roda `praxis executar` de novo — ele
-    **retoma a mesma fase de onde parou**, sem esbarrar na checagem de árvore
-    limpa (o trabalho não commitado da fase é preservado). Se você não fizer
-    nada, o comportamento é o de sempre (dorme e retoma sozinho).
-  - **Ctrl+C também pausa:** interromper uma fase em andamento agora a deixa
-    `pausada` (retomável), em vez de bloquear a próxima execução por árvore suja.
-
-## Notificações remotas (webhook)
-
-Para ser avisado **de longe** quando algo pedir sua atenção (franquia esgotada,
-fase concluída, parada por erro), ative o webhook. No `inicializar`, responda
-**sim** para notificações (ou `inicializar --webhook sim`): isso cria
-`automacao/notificacoes.ini` (um modelo com exemplos comentados para
-**Telegram**, **Discord**, **Slack**, **Google Chat** e um **webhook
-genérico**). Preencha os tokens do canal que quiser e mude `ativo = sim`. O
-arquivo **nunca é versionado** (contém segredos).
-
-Eventos notificados: franquia de tokens esgotada (assim que começa a esperar o
-reset), parada da rodada (fim/erro/pausa) e **conclusão de fases marcadas como
-notificáveis** (coluna `notificar=sim` no `fases.csv`) — nesse caso o aviso traz
-o código e o título da fase mais um panorama (quantas concluídas, pendentes,
-falharam...).
-
-## Segurança do painel (Basic Auth)
-
-O painel é somente-leitura, mas transmite os logs — trate a rede com cuidado.
-Para protegê-lo com usuário/senha, gere a credencial:
-
-```powershell
-.\automacao\praxis.exe auth        # pergunta usuário e senha, imprime o base64
-```
-
-Cole o valor na seção `[painel]` do `notificacoes.ini` (`auth = sim` +
-`base64 = ...`). Opcionalmente, `bind = 127.0.0.1` restringe o painel ao próprio
-servidor (acesse de fora via túnel SSH).
-
-## Arquivos por projeto (referência)
+O comando cria ou atualiza:
 
 | Arquivo | Papel |
 |---|---|
-| `<plano>.md` | Plano canônico: fases com checkboxes, "Depende de:" e Registro de Andamento (memória entre fases) |
-| `automacao/autopilot.json` | Config: plano, modelo, `add_dirs` (outros repos), budget/timeout, gates, `versionar_automacao` |
-| `automacao/fases.csv` | Fila (`;`): `fase;titulo;status;depende_de;requer_humano;notificar;gate_extra;modelo;tentativas;custo_usd;concluido_em;observacao` |
-| `automacao/notificacoes.ini` | Opcional (não versionado): tokens de webhook e Basic Auth do painel |
-| `automacao/prompts/*.md` | Prompts personalizáveis; se apagados, valem os embutidos no binário |
-| `automacao/logs/` | `.jsonl` por run do claude, log dos gates, `RESUMO-*.md` por rodada |
+| `automacao/fases.csv` | fila de fases |
+| `automacao/autopilot.json` | configuracao unica do Praxis |
+| `automacao/autopilot.exemplo.json` | exemplo sem segredos |
+| `automacao/prompts/*.md` | prompts editaveis |
+| `automacao/logs/` | logs JSONL e logs dos gates |
 
-Estados no CSV: `pendente` · `executando` · `concluida` · `falhou` ·
-`bloqueada` (requer humano) · `pausada` (interrompida; retomável) · `adiada`. Dependências: `2f+3e`. Fases com
-hardware físico/aprovação externa: `requer_humano=sim` — o runner nunca as
-executa.
+`autopilot.json` e a fonte de verdade. Ele e relido antes de cada operacao e
+antes de cada notificacao, entao editar o arquivo ou salvar pelo painel passa a
+valer no proximo passo sem reiniciar.
 
-`.\automacao\praxis.exe ajuda` imprime esta referência no terminal.
+## Configuracao unificada
 
-## Evoluindo o código
+Exemplo resumido de `automacao/autopilot.json`:
 
-Um único pacote Go, sem dependências externas:
+```json
+{
+  "plano": "PLANO.md",
+  "add_dirs": [],
+  "max_budget_usd": 25,
+  "timeout_min": 120,
+  "max_correcoes": 2,
+  "max_ciclos_revisao": 1,
+  "versionar_automacao": true,
+  "gates": [],
+  "gates_extra": [],
+  "motores": {
+    "operacoes": {
+      "planejar": "claude",
+      "executar": "codex",
+      "corrigir": "codex",
+      "revisar": "claude"
+    },
+    "modelos": {
+      "claude": "opus",
+      "codex": "gpt-5.5"
+    },
+    "esforcos": {
+      "claude": "high",
+      "codex": "high"
+    },
+    "fallback": {
+      "ativo": true,
+      "ordem": ["claude", "codex"]
+    }
+  },
+  "notificacoes": {
+    "canais": {
+      "telegram": {"ativo": false, "bot_token": "", "chat_id": ""},
+      "discord": {"ativo": false, "webhook_url": ""},
+      "slack": {"ativo": false, "webhook_url": ""},
+      "google_chat": {"ativo": false, "webhook_url": ""},
+      "webhook": {"ativo": false, "url": "", "header": "", "template": ""}
+    },
+    "eventos": {
+      "inicializacao_concluida": true,
+      "planejamento_iniciado": false,
+      "fase_iniciada": false,
+      "gates_falharam": false,
+      "correcao_iniciada": false,
+      "revisor_reprovou": false,
+      "troca_de_harness": true,
+      "franquia_esgotada": true,
+      "fase_concluida": true,
+      "marco_concluido": true,
+      "rodada_concluida": true,
+      "rodada_parou": true,
+      "pausa": false,
+      "erro_interno": true
+    }
+  },
+  "painel": {
+    "auth_ativo": false,
+    "credencial_base64": "",
+    "bind": ""
+  }
+}
+```
+
+Campos legados `modelo` e `motor`, se existirem, ainda sao usados como default
+quando os blocos novos nao definem valor.
+`motores.esforcos` define o nivel de raciocinio por motor; por padrao Claude e
+Codex usam `high`.
+Durante a inicializacao, `--motor codex` configura todas as operacoes para
+Codex; depois voce pode separar por funcao em `motores.operacoes`.
+
+## Motores e fallback
+
+`motores.operacoes` escolhe o harness por etapa:
+
+- `planejar`: usado por `inicializar`
+- `executar`: executor e atualizacao do plano
+- `corrigir`: corretor apos gates/revisor
+- `revisar`: revisor somente leitura
+
+Exemplo comum:
+
+```json
+"operacoes": {
+  "planejar": "claude",
+  "executar": "codex",
+  "corrigir": "codex",
+  "revisar": "claude"
+}
+```
+
+Se `motores.fallback.ativo=true`, quando o motor atual sinaliza limite de uso o
+Praxis tenta o proximo motor em `fallback.ordem` que ainda nao esgotou na
+rodada. Se nao houver outro motor, preserva o comportamento anterior: espera o
+reset da franquia, aceita Enter para pausar e Ctrl+C para interromper.
+
+Codex nao reporta custo em USD nativo; o Praxis estima por tokens e aplica
+`max_budget_usd` como teto soft entre runs.
+
+## Executar
+
+```powershell
+.\automacao\praxis.exe executar
+.\automacao\praxis.exe executar 2d
+.\automacao\praxis.exe executar 2d,2e
+.\automacao\praxis.exe executar --painel
+```
+
+Praxis exige arvore git limpa fora de `automacao/`. Cada fase concluida vira um
+commit local. Ele nunca faz `git push`.
+
+## Painel
+
+```powershell
+.\automacao\praxis.exe painel
+.\automacao\praxis.exe painel --porta 8080 --abrir nao
+```
+
+O painel mostra status, progresso e logs ao vivo. Ele tambem edita os blocos
+`motores`, `notificacoes` e `painel` do `autopilot.json` via `GET/POST
+/api/config`.
+
+Edicao de configuracao exige Basic Auth ativo. Gere a credencial:
+
+```powershell
+.\automacao\praxis.exe auth
+```
+
+Cole em:
+
+```json
+"painel": {
+  "auth_ativo": true,
+  "credencial_base64": "BASE64_DE_USUARIO_SENHA",
+  "bind": "127.0.0.1"
+}
+```
+
+Quando o painel esta sem auth, a tela de configuracao fica somente leitura e
+`POST /api/config` retorna erro.
+
+## Notificacoes
+
+Todos os canais e eventos ficam em `autopilot.json`. O arquivo legado
+`automacao/notificacoes.ini`, se existir na primeira carga, e importado uma vez
+para o JSON e renomeado para `.bak`.
+
+Eventos ligados por padrao: `inicializacao_concluida`, `troca_de_harness`,
+`franquia_esgotada`, `fase_concluida`, `marco_concluido`,
+`rodada_concluida`, `rodada_parou`, `erro_interno`.
+
+Eventos desligados por padrao: `planejamento_iniciado`, `fase_iniciada`,
+`gates_falharam`, `correcao_iniciada`, `revisor_reprovou`, `pausa`.
+
+Um aviso so e enviado se algum canal estiver ativo e o evento estiver ligado.
+
+## Segredos e versionamento
+
+`automacao/autopilot.json` contem tokens e credenciais, portanto entra no
+`.gitignore` gerenciado pelo Praxis. `automacao/autopilot.exemplo.json` nao
+contem segredos e pode ser versionado.
+
+Com `versionar_automacao=true`, o Praxis continua versionando `fases.csv` e faz
+commits de bookkeeping do estado. Com `false`, a pasta `automacao/` inteira fica
+ignorada.
+
+## Extensibilidade
+
+Novo harness = implementar a interface `Motor`, registrar em `motoresRegistrados`
+e, opcionalmente, definir modelo padrao e trailer de coautoria. O pipeline usa a
+interface generica e nao precisa conhecer detalhes do harness.
+
+## Arquivos principais
 
 | Arquivo | Responsabilidade |
 |---|---|
-| `main.go` | CLI e ajuda |
-| `executar.go` | pipeline por fase (o coração) |
-| `inicializar.go` | quebra do plano em micro-fases via Claude |
-| `claude.go` | invocação headless do `claude -p` (stream-json, `--json-schema`) |
-| `gates.go` | gates determinísticos |
-| `fases.go` / `config.go` | fila CSV e configuração |
-| `status.go` / `painel.go` | acompanhamento no terminal e painel web |
-| `git.go` / `notificar.go` / `prompts.go` | apoio |
-| `notificacoes.go` / `auth.go` | webhook (Telegram/Discord/Slack/Google Chat) e Basic Auth do painel |
-| `defaults/*.md` | prompts padrão (embutidos no binário via `go:embed`) |
-
-Segurança embutida: pré-checagem de árvore limpa (nunca faz reset/stash);
-executor/corretor proibidos de `git commit/push`; revisor somente-leitura;
-orçamento (`max_budget_usd`) e timeout por run; gates rodados pelo orquestrador,
-nunca autorrelatados pelo modelo.
+| `motor.go` | interface generica e registro de motores |
+| `claude.go` | motor Claude Code |
+| `codex.go` | motor Codex CLI |
+| `fallback.go` | fallback e espera de reset |
+| `executar.go` | pipeline por fase |
+| `inicializar.go` | planejamento inicial |
+| `config.go` | `autopilot.json` unificado |
+| `painel.go` | painel e edicao de config |
+| `notificacoes.go` / `auth.go` | notificacoes e Basic Auth |

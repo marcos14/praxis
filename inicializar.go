@@ -42,17 +42,16 @@ type saidaInit struct {
 	GatesExtra []GateExtra `json:"gates_extra"`
 }
 
-// cmdInicializar prepara um projeto para o autopilot: pergunta o caminho do
-// plano do usuario, usa o Claude para quebra-lo em micro-fases (editando o
-// proprio plano) e gera automacao/fases.csv + autopilot.json + prompts.
+// cmdInicializar prepara um projeto para o autopilot.
 func cmdInicializar(argv []string) error {
 	fs := flag.NewFlagSet("inicializar", flag.ExitOnError)
 	raizFlag := fs.String("raiz", "", "raiz do projeto (padrao: diretorio atual)")
 	planoFlag := fs.String("plano", "", "caminho do plano .md, relativo a raiz (senao, pergunta)")
-	modeloFlag := fs.String("modelo", "", "modelo para executar as fases (padrao: opus)")
-	addDirsFlag := fs.String("add-dirs", "", "diretorios adicionais editaveis pelo Claude, separados por virgula")
+	motorFlag := fs.String("motor", "", "harness para planejar/executar inicialmente: claude|codex (senao, pergunta)")
+	modeloFlag := fs.String("modelo", "", "modelo legado do Claude; use motores.modelos no autopilot.json para configurar por harness")
+	addDirsFlag := fs.String("add-dirs", "", "diretorios adicionais editaveis pelo harness, separados por virgula")
 	versionarFlag := fs.String("versionar", "", "versionar o estado do Praxis (automacao/) no git: sim|nao (padrao: sim)")
-	webhookFlag := fs.String("webhook", "", "ativar notificacoes por webhook (cria notificacoes.ini): sim|nao")
+	webhookFlag := fs.String("webhook", "", "ativar notificacoes por webhook no autopilot.json: sim|nao")
 	fs.Parse(argv)
 	raiz := *raizFlag
 	if raiz == "" {
@@ -74,7 +73,6 @@ func cmdInicializar(argv []string) error {
 		return linha
 	}
 
-	// 1) coleta das respostas (flags tem precedencia; senao pergunta)
 	plano := *planoFlag
 	if plano == "" {
 		sugestao := ""
@@ -92,8 +90,8 @@ func cmdInicializar(argv []string) error {
 	}
 
 	addDirsBruto := *addDirsFlag
-	if addDirsBruto == "" && *planoFlag == "" { // modo interativo
-		addDirsBruto = perguntar("Diretorios adicionais que o Claude pode editar (outros repos), separados por virgula (vazio = nenhum)", "")
+	if addDirsBruto == "" && *planoFlag == "" {
+		addDirsBruto = perguntar("Diretorios adicionais que o harness pode editar (outros repos), separados por virgula (vazio = nenhum)", "")
 	}
 	var addDirs []string
 	for _, d := range strings.Split(addDirsBruto, ",") {
@@ -102,15 +100,6 @@ func cmdInicializar(argv []string) error {
 		}
 	}
 
-	modelo := *modeloFlag
-	if modelo == "" && *planoFlag == "" {
-		modelo = perguntar("Modelo para executar as fases", "opus")
-	}
-	if modelo == "" {
-		modelo = "opus"
-	}
-
-	// 2) estrutura de arquivos
 	if err := os.MkdirAll(dirLogs(raiz), 0o755); err != nil {
 		return err
 	}
@@ -119,19 +108,29 @@ func cmdInicializar(argv []string) error {
 	}
 	cfg := configPadrao()
 	if existente, err := carregarConfig(raiz); err == nil {
-		cfg = existente // preserva ajustes (budget, timeout, gates...) em re-inicializacao
+		cfg = existente
 	}
 	cfg.Plano = plano
-	cfg.Modelo = modelo
 	cfg.AddDirs = addDirs
+	if modelo := strings.TrimSpace(*modeloFlag); modelo != "" {
+		cfg.Modelo = modelo
+		cfg.Motores.Modelos["claude"] = modelo
+	}
 
-	// versionar o estado do Praxis (automacao/) no git? Versionando, o Praxis
-	// faz um commit de bookkeeping por fase (progresso no historico, arvore
-	// limpa); senao, joga a pasta automacao/ inteira no .gitignore.
-	versionar := cfg.VersionarAutomacao // padrao: config existente ou true
+	motorEscolhido := normalizarNomeMotor(*motorFlag)
+	if motorEscolhido == "" && *planoFlag == "" {
+		motorEscolhido = perguntarMotorInicializacao(perguntar, cfg)
+	}
+	if motorEscolhido != "" {
+		if err := aplicarMotorInicializacao(cfg, motorEscolhido); err != nil {
+			return err
+		}
+	}
+
+	versionar := cfg.VersionarAutomacao
 	if v := strings.TrimSpace(*versionarFlag); v != "" {
 		versionar = ehSim(v)
-	} else if *planoFlag == "" { // modo interativo
+	} else if *planoFlag == "" {
 		sug := "nao"
 		if versionar {
 			sug = "sim"
@@ -140,53 +139,56 @@ func cmdInicializar(argv []string) error {
 	}
 	cfg.VersionarAutomacao = versionar
 
-	// notificacoes por webhook (opcional): se ativado, geramos um
-	// notificacoes.ini modelo (com exemplos por plataforma) para o usuario
-	// preencher os tokens. O arquivo nunca e versionado (contem segredos).
 	ativarWebhook := false
 	if v := strings.TrimSpace(*webhookFlag); v != "" {
 		ativarWebhook = ehSim(v)
-	} else if *planoFlag == "" { // modo interativo
-		ativarWebhook = ehSim(perguntar("Ativar notificações por webhook (Telegram/Discord/Slack/Google Chat/genérico)? Cria um notificacoes.ini para você preencher os tokens", "nao"))
+	} else if *planoFlag == "" {
+		ativarWebhook = ehSim(perguntar("Ativar notificacoes por webhook no autopilot.json (Telegram/Discord/Slack/Google Chat/generico)?", "nao"))
 	}
 	if ativarWebhook {
-		if criado, err := escreverNotificacoesExemplo(raiz); err != nil {
-			fmt.Printf("AVISO: nao consegui criar %s: %v\n", caminhoNotificacoes(raiz), err)
-		} else if criado {
-			fmt.Printf("  criado %s — preencha os tokens/segredos antes de executar.\n", caminhoNotificacoes(raiz))
-		} else {
-			fmt.Printf("  %s ja existe — mantido.\n", caminhoNotificacoes(raiz))
-		}
+		fmt.Printf("  configure os canais em %s; %s sera gerado sem segredos.\n", caminhoConfig(raiz), caminhoConfigExemplo(raiz))
+	}
+	if err := salvarConfig(raiz, cfg); err != nil {
+		return err
+	}
+	if err := garantirGitignore(raiz, cfg.VersionarAutomacao); err != nil {
+		fmt.Printf("AVISO: nao consegui ajustar o .gitignore: %v\n", err)
 	}
 
-	// 3) o Claude analisa o plano, quebra em micro-fases (editando o .md) e
-	// devolve fases + gates em JSON estruturado
-	fmt.Printf("\n▶ analisando `%s` e quebrando em micro-fases (claude, modelo %s)...\n", plano, modelo)
+	notif := carregarNotificador(raiz)
+	notif.enviarEvento("planejamento_iniciado", "Praxis: planejamento iniciado", fmt.Sprintf("Plano: %s", plano))
+
+	motorPlanejar := motorParaOperacao(cfg, "planejar")
+	modeloPlanejar := modeloParaMotor(cfg, motorPlanejar)
+	fmt.Printf("\n> analisando `%s` e quebrando em micro-fases (%s", plano, motorPlanejar)
+	if modeloPlanejar != "" {
+		fmt.Printf(", modelo %s", modeloPlanejar)
+	}
+	fmt.Println(")...")
 	tpl, err := carregarPrompt(raiz, "inicializador.md")
 	if err != nil {
 		return err
 	}
-	res, err := rodarClaude(OpcoesClaude{
+	res, motorUsado, err := rodarComFallback(raiz, "planejar", motorPlanejar, OpcoesRun{
 		Raiz: raiz, Prompt: renderPrompt(tpl, map[string]string{"PLANO": plano}),
-		Modelo: modelo, AddDirs: addDirs, BudgetUSD: cfg.MaxBudgetUSD,
-		TimeoutMin: cfg.TimeoutMin, JSONSchema: schemaInit,
-		Disallowed: proibidosSempre, RotuloLog: "inicializar",
-	})
+		Modelo: modeloPlanejar, Esforco: esforcoParaMotor(cfg, motorPlanejar), AddDirs: addDirs, BudgetUSD: cfg.MaxBudgetUSD,
+		TimeoutMin: cfg.TimeoutMin, Schema: schemaInit,
+		ProibirCommit: true, RotuloLog: "inicializar",
+	}, novoEstadoFallback())
 	if err != nil {
 		return err
 	}
 	if res.IsError {
-		return fmt.Errorf("inicializacao falhou (%s) — log: %s", res.Subtipo, res.LogPath)
+		return fmt.Errorf("inicializacao falhou (%s); log: %s", res.Subtipo, res.LogPath)
 	}
 	var saida saidaInit
 	if err := decodificarEstruturado(res, &saida); err != nil {
-		return fmt.Errorf("nao consegui ler o JSON de fases (%v) — log: %s", err, res.LogPath)
+		return fmt.Errorf("nao consegui ler o JSON de fases (%v); log: %s", err, res.LogPath)
 	}
 	if len(saida.Fases) == 0 {
-		return fmt.Errorf("o inicializador nao retornou fases — log: %s", res.LogPath)
+		return fmt.Errorf("o inicializador nao retornou fases; log: %s", res.LogPath)
 	}
 
-	// 4) grava fases.csv (com backup, se ja existir) e autopilot.json
 	csvPath := caminhoCSV(raiz)
 	if _, err := os.Stat(csvPath); err == nil {
 		backup := strings.TrimSuffix(csvPath, ".csv") + "-" + agoraTS() + ".bak.csv"
@@ -220,8 +222,9 @@ func cmdInicializar(argv []string) error {
 	if err := garantirGitignore(raiz, cfg.VersionarAutomacao); err != nil {
 		fmt.Printf("AVISO: nao consegui ajustar o .gitignore: %v\n", err)
 	}
+	notif.enviarEvento("inicializacao_concluida", "Praxis: inicializacao concluida",
+		fmt.Sprintf("%d fases geradas para %s", len(fases), plano))
 
-	// 5) resumo
 	pendentes := 0
 	for _, f := range fases {
 		if f.Status == StPendente {
@@ -229,7 +232,7 @@ func cmdInicializar(argv []string) error {
 		}
 	}
 	fmt.Printf(`
-Inicializacao concluida (custo US$ %.2f):
+Inicializacao concluida (motor %s, custo US$ %.2f):
   plano:    %s (reestruturado em %d fases, %d pendentes)
   fila:     %s
   config:   %s (%d gates)
@@ -237,9 +240,75 @@ Inicializacao concluida (custo US$ %.2f):
 
 Proximos passos:
   1. Revise o plano, o fases.csv (dependencias, requer_humano) e o autopilot.json (gates, budget).
-  2. Rode: praxis executar
-`, res.CustoUSD, plano, len(fases), pendentes, csvPath, caminhoConfig(raiz), len(cfg.Gates), dirPrompts(raiz))
+  2. No autopilot.json, voce pode editar motores.operacoes para escolher o harness por funcao
+     (planejar/executar/corrigir/revisar), motores.modelos para sobrescrever modelos e
+     motores.esforcos para ajustar o esforco.
+  3. Rode: praxis executar
+`, motorUsado, res.CustoUSD, plano, len(fases), pendentes, csvPath, caminhoConfig(raiz), len(cfg.Gates), dirPrompts(raiz))
 	return nil
+}
+
+func perguntarMotorInicializacao(perguntar func(string, string) string, cfg *Config) string {
+	instalados := motoresInstalados()
+	atual := motorParaOperacao(cfg, "planejar")
+	padrao := atual
+	if !contemString(instalados, atual) && len(instalados) > 0 {
+		padrao = instalados[0]
+	}
+	if len(instalados) > 0 {
+		fmt.Printf("Harnesses encontrados no PATH: %s\n", strings.Join(instalados, ", "))
+	} else {
+		fmt.Printf("AVISO: nao encontrei nenhum harness conhecido no PATH (%s).\n", strings.Join(motoresConhecidos(), ", "))
+	}
+	resp := perguntar("Harness inicial para planejar/executar (modelo default do harness; depois edite por funcao no autopilot.json)", padrao)
+	return normalizarNomeMotor(resp)
+}
+
+func aplicarMotorInicializacao(cfg *Config, motor string) error {
+	motor = normalizarNomeMotor(motor)
+	if _, err := selecionarMotor(motor); err != nil {
+		return err
+	}
+	if !motorInstalado(motor) {
+		fmt.Printf("AVISO: harness %q nao foi encontrado no PATH; vou salvar a config mesmo assim.\n", motor)
+	}
+	if cfg.Motores.Operacoes == nil {
+		cfg.Motores.Operacoes = map[string]string{}
+	}
+	for _, op := range operacoesValidas {
+		cfg.Motores.Operacoes[op] = motor
+	}
+	cfg.Motor = motor
+	cfg.Motores.Fallback.Ordem = ordemFallbackInicial(motor)
+	return nil
+}
+
+func ordemFallbackInicial(primeiro string) []string {
+	primeiro = normalizarNomeMotor(primeiro)
+	ordem := []string{}
+	if primeiro != "" {
+		ordem = append(ordem, primeiro)
+	}
+	for _, motor := range motoresInstalados() {
+		if motor != primeiro {
+			ordem = append(ordem, motor)
+		}
+	}
+	for _, motor := range motoresConhecidos() {
+		if motor != primeiro && !contemString(ordem, motor) {
+			ordem = append(ordem, motor)
+		}
+	}
+	return ordem
+}
+
+func contemString(vs []string, alvo string) bool {
+	for _, v := range vs {
+		if v == alvo {
+			return true
+		}
+	}
+	return false
 }
 
 // ehSim interpreta respostas afirmativas (sim/s/y/yes/true/1); qualquer outra
