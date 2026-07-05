@@ -130,10 +130,19 @@ func (n *Notificador) config() (*Config, bool) {
 }
 
 func (n *Notificador) enviarComConfig(cfg *Config, titulo, corpo string) {
-	texto := strings.TrimSpace(titulo)
-	if c := strings.TrimSpace(corpo); c != "" {
-		texto += "\n" + c
+	cab := cabecalhoProjeto(cfg)
+	partes := make([]string, 0, 3)
+	if cab != "" {
+		partes = append(partes, cab)
 	}
+	if t := strings.TrimSpace(titulo); t != "" {
+		partes = append(partes, t)
+	}
+	if c := strings.TrimSpace(corpo); c != "" {
+		partes = append(partes, c)
+	}
+	texto := strings.Join(partes, "\n")
+
 	canais := cfg.Notificacoes.Canais
 	if c := canais["telegram"]; c.Ativo {
 		n.enviarTelegram(c, texto)
@@ -148,8 +157,41 @@ func (n *Notificador) enviarComConfig(cfg *Config, titulo, corpo string) {
 		n.postJSON(c.WebhookURL, map[string]string{"text": texto}, "")
 	}
 	if c := canais["webhook"]; c.Ativo {
-		n.postJSON(c.URL, map[string]string{"titulo": titulo, "texto": corpo}, c.Header)
+		n.postJSON(c.URL, map[string]string{
+			"projeto": strings.TrimSpace(cfg.Projeto),
+			"autor":   strings.TrimSpace(cfg.Autor),
+			"titulo":  titulo,
+			"texto":   corpo,
+		}, c.Header)
 	}
+}
+
+// cabecalhoProjeto monta uma linha de identificacao do projeto para o topo das
+// notificacoes, ajudando a distinguir execucoes simultaneas de varios projetos.
+func cabecalhoProjeto(cfg *Config) string {
+	if cfg == nil {
+		return ""
+	}
+	partes := make([]string, 0, 4)
+	if p := strings.TrimSpace(cfg.Projeto); p != "" {
+		partes = append(partes, p)
+	}
+	if a := strings.TrimSpace(cfg.Autor); a != "" {
+		partes = append(partes, "por "+a)
+	}
+	motor := motorParaOperacao(cfg, "executar")
+	if modelo := strings.TrimSpace(modeloParaMotor(cfg, motor)); modelo != "" {
+		partes = append(partes, motor+"/"+modelo)
+	} else if motor != "" {
+		partes = append(partes, motor)
+	}
+	if pl := strings.TrimSpace(cfg.Plano); pl != "" {
+		partes = append(partes, pl)
+	}
+	if len(partes) == 0 {
+		return ""
+	}
+	return "🏷 " + strings.Join(partes, " · ")
 }
 
 func (n *Notificador) enviarTelegram(c CanalNotificacao, texto string) {

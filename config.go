@@ -35,8 +35,10 @@ type GateExtra struct {
 
 type Config struct {
 	Plano              string             `json:"plano"`
-	Modelo             string             `json:"modelo,omitempty"` // legado: default do Claude
-	Motor              string             `json:"motor,omitempty"`  // legado: default por operacao
+	Projeto            string             `json:"projeto,omitempty"` // nome amigavel exibido nas notificacoes
+	Autor              string             `json:"autor,omitempty"`   // responsavel; ajuda a distinguir execucoes simultaneas
+	Modelo             string             `json:"modelo,omitempty"`  // legado: default do Claude
+	Motor              string             `json:"motor,omitempty"`   // legado: default por operacao
 	AddDirs            []string           `json:"add_dirs"`
 	MaxBudgetUSD       float64            `json:"max_budget_usd"`
 	TimeoutMin         int                `json:"timeout_min"`
@@ -275,6 +277,9 @@ func normalizarConfig(raiz string, cfg *Config) error {
 	if cfg.Plano == "" {
 		cfg.Plano = "PLANO.md"
 	}
+	if strings.TrimSpace(cfg.Projeto) == "" {
+		cfg.Projeto = nomeProjetoPadrao(raiz)
+	}
 	if cfg.Modelo == "" {
 		cfg.Modelo = "opus"
 	}
@@ -461,6 +466,23 @@ func firstNonEmpty(vs ...string) string {
 		}
 	}
 	return ""
+}
+
+// nomeProjetoPadrao deriva um nome amigavel a partir do diretorio raiz, usado
+// para identificar o projeto nas notificacoes quando `projeto` nao foi definido.
+func nomeProjetoPadrao(raiz string) string {
+	r := strings.TrimSpace(raiz)
+	if r == "" {
+		r = "."
+	}
+	if abs, err := filepath.Abs(r); err == nil && abs != "" {
+		r = abs
+	}
+	nome := filepath.Base(r)
+	if nome == "." || nome == string(filepath.Separator) || nome == "" {
+		return "praxis"
+	}
+	return nome
 }
 
 func motorParaOperacao(cfg *Config, operacao string) string {
