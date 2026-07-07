@@ -3,6 +3,8 @@ Execute a **Fase {FASE} — {TITULO}** descrita em `{PLANO}` (na raiz deste repo
 Regras:
 - Siga à risca as instruções do projeto (CLAUDE.md/AGENTS.md): testes como gate, arquitetura, padrões de código.
 - Trabalhe SOMENTE nesta fase. Não adiante tarefas de outras fases.
+- NUNCA adie, corte ou "deixe para depois" nada que pertença ao escopo DESTA fase: se está nos critérios/checkboxes da fase, precisa ser entregue agora. Anotar "fica para depois" para escopo da própria fase é motivo de REPROVAÇÃO pelo revisor.
+- Se descobrir trabalho necessário que NÃO pertence a esta fase (ex.: refatoração maior, feature adjacente, dívida técnica), NÃO o implemente: registre-o numa subseção **"Pendências descobertas"** dentro da sua entrada no Registro de Andamento de `{PLANO}`, com uma frase de meta e, se possível, um mini-checklist. O revisor vai transformar essas pendências em fases novas na fila — nada se perde, mas nada é implementado fora de hora.
 - Os diretórios adicionais necessários (outros repositórios) já estão autorizados nesta sessão.
 - Antes de concluir, rode os comandos de verificação do projeto e deixe-os verdes.
 - Ao concluir, atualize `{PLANO}`: marque os checkboxes da fase, ajuste o status dela no dashboard (se existir) e adicione uma entrada no **Registro de Andamento** com data, o que foi feito, decisões/desvios e QUALQUER achado útil às fases futuras (ex.: nomes reais de tabelas, comportamentos inesperados do sistema legado). O Registro de Andamento é a memória compartilhada entre as fases — capriche.

@@ -15,6 +15,15 @@ O conhecimento entre fases fica no proprio plano Markdown, na secao
 `Registro de Andamento`. Cada run recebe contexto limpo e reler arquivos e
 configuracao do disco.
 
+O revisor nao aceita escopo da fase "deixado para depois" — isso reprova a
+entrega. Trabalho legitimo fora do escopo (pendencias descobertas pelo
+executor) vira `fases_novas` no veredito: o orquestrador valida, deduplica por
+titulo, respeita o teto `max_fases_novas` por rodada, insere as fases no
+`fases.csv` (dependendo da fase de origem) e anexa a especificacao delas ao
+plano, na secao `## Fases descobertas (adicionadas pelo Praxis)`. As fases
+inseridas executam na mesma rodada; o excedente do teto e descartado com log e
+notificacao.
+
 ## Requisitos
 
 - `git`
@@ -69,6 +78,7 @@ Exemplo resumido de `automacao/autopilot.json`:
   "timeout_min": 120,
   "max_correcoes": 2,
   "max_ciclos_revisao": 1,
+  "max_fases_novas": 10,
   "versionar_automacao": true,
   "gates": [],
   "gates_extra": [],
@@ -110,6 +120,8 @@ Exemplo resumido de `automacao/autopilot.json`:
       "troca_de_harness": true,
       "franquia_esgotada": true,
       "fase_concluida": true,
+      "fases_novas_inseridas": true,
+      "fases_novas_descartadas": true,
       "marco_concluido": true,
       "rodada_concluida": true,
       "rodada_parou": true,
@@ -209,8 +221,9 @@ Todos os canais e eventos ficam em `autopilot.json`. O arquivo legado
 para o JSON e renomeado para `.bak`.
 
 Eventos ligados por padrao: `inicializacao_concluida`, `troca_de_harness`,
-`franquia_esgotada`, `fase_concluida`, `marco_concluido`,
-`rodada_concluida`, `rodada_parou`, `erro_interno`.
+`franquia_esgotada`, `fase_concluida`, `fases_novas_inseridas`,
+`fases_novas_descartadas`, `marco_concluido`, `rodada_concluida`,
+`rodada_parou`, `erro_interno`.
 
 Eventos desligados por padrao: `planejamento_iniciado`, `fase_iniciada`,
 `gates_falharam`, `correcao_iniciada`, `revisor_reprovou`, `pausa`.

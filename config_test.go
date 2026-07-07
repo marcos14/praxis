@@ -15,6 +15,7 @@ func TestConfigRoundTrip(t *testing.T) {
 	}
 	cfg := configPadrao()
 	cfg.Plano = "docs/PLANO.md"
+	cfg.Projeto = "meu-projeto"
 	cfg.AddDirs = []string{`C:\projetos\outro_repo`}
 	cfg.Gates = []Gate{{Nome: "go", Dir: ".", Comandos: []string{"go build ./...", "go test ./..."}}}
 	cfg.GatesExtra = []GateExtra{{Nome: "integration", Comandos: []string{"go test -tags=integration ./..."}}}
@@ -123,6 +124,40 @@ func TestCarregarConfigReleituraFresca(t *testing.T) {
 	}
 	if got := segunda.Motores.Operacoes["executar"]; got != "codex" {
 		t.Fatalf("releitura nao refletiu mudanca no disco: %q", got)
+	}
+}
+
+func TestNormalizarMaxFasesNovas(t *testing.T) {
+	raiz := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(raiz, dirAutomacao), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// config antiga, sem o campo: normaliza para o default 10
+	bruto := `{"plano":"PLANO.md","gates":[]}`
+	if err := os.WriteFile(caminhoConfig(raiz), []byte(bruto), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := carregarConfig(raiz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxFasesNovas != 10 {
+		t.Fatalf("max_fases_novas ausente deveria normalizar para 10, veio %d", cfg.MaxFasesNovas)
+	}
+	if !cfg.Notificacoes.Eventos["fases_novas_inseridas"] || !cfg.Notificacoes.Eventos["fases_novas_descartadas"] {
+		t.Fatalf("eventos de fases novas deveriam nascer ativos: %+v", cfg.Notificacoes.Eventos)
+	}
+	// -1 desativa o recurso e e preservado
+	bruto = `{"plano":"PLANO.md","max_fases_novas":-1,"gates":[]}`
+	if err := os.WriteFile(caminhoConfig(raiz), []byte(bruto), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = carregarConfig(raiz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxFasesNovas != -1 {
+		t.Fatalf("max_fases_novas=-1 deveria ser preservado, veio %d", cfg.MaxFasesNovas)
 	}
 }
 

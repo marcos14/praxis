@@ -44,6 +44,7 @@ type Config struct {
 	TimeoutMin         int                `json:"timeout_min"`
 	MaxCorrecoes       int                `json:"max_correcoes"`
 	MaxCiclosRevisao   int                `json:"max_ciclos_revisao"`
+	MaxFasesNovas      int                `json:"max_fases_novas"` // teto de fases descobertas inseridas por rodada; -1 desativa
 	VersionarAutomacao bool               `json:"versionar_automacao"`
 	Gates              []Gate             `json:"gates"`
 	GatesExtra         []GateExtra        `json:"gates_extra,omitempty"`
@@ -103,6 +104,8 @@ var catalogoEventos = []eventoNotificavel{
 	{"troca_de_harness", true},
 	{"franquia_esgotada", true},
 	{"fase_concluida", true},
+	{"fases_novas_inseridas", true},
+	{"fases_novas_descartadas", true},
 	{"marco_concluido", true},
 	{"rodada_concluida", true},
 	{"rodada_parou", true},
@@ -119,6 +122,7 @@ func configPadrao() *Config {
 		TimeoutMin:         120,
 		MaxCorrecoes:       4,
 		MaxCiclosRevisao:   2,
+		MaxFasesNovas:      10,
 		VersionarAutomacao: true,
 		Gates:              []Gate{},
 		GatesExtra:         []GateExtra{},
@@ -294,6 +298,9 @@ func normalizarConfig(raiz string, cfg *Config) error {
 	}
 	if cfg.MaxCiclosRevisao == 0 {
 		cfg.MaxCiclosRevisao = 2
+	}
+	if cfg.MaxFasesNovas == 0 {
+		cfg.MaxFasesNovas = 10
 	}
 	if len(cfg.Motores.Operacoes) == 0 {
 		cfg.Motores.Operacoes = motoresPadrao(cfg.Modelo, cfg.Motor).Operacoes

@@ -14,11 +14,12 @@ import (
 	"syscall"
 )
 
-const schemaVeredito = `{"type":"object","required":["veredito","problemas"],"properties":{"veredito":{"type":"string","enum":["APROVADO","REPROVADO"]},"problemas":{"type":"array","items":{"type":"string"}}}}`
+const schemaVeredito = `{"type":"object","required":["veredito","problemas"],"properties":{"veredito":{"type":"string","enum":["APROVADO","REPROVADO"]},"problemas":{"type":"array","items":{"type":"string"}},"fases_novas":{"type":"array","items":{"type":"object","required":["titulo","descricao"],"properties":{"titulo":{"type":"string"},"descricao":{"type":"string"},"checklist":{"type":"array","items":{"type":"string"}},"depende_de":{"type":"array","items":{"type":"string"}},"gate_extra":{"type":"string"},"observacao":{"type":"string"}}}}}}`
 
 type Veredito struct {
-	Veredito  string   `json:"veredito"`
-	Problemas []string `json:"problemas"`
+	Veredito   string     `json:"veredito"`
+	Problemas  []string   `json:"problemas"`
+	FasesNovas []FaseNova `json:"fases_novas"`
 }
 
 // O commit e responsabilidade do orquestrador — nenhum run pode commitar/pushar.
@@ -90,10 +91,11 @@ func cmdExecutar(argv []string) error {
 	var errParada error
 	motivoParada := "fila processada"
 
+	var novasNaRodada int
 	executarUma := func(f *Fase) error {
 		faseCorrente = f.Fase
 		estado.definirFase(f.Fase)
-		errFase := pipelineFase(ctx, raiz, cfg, fases, f, pausaCh, notif, estadoFallback)
+		errFase := pipelineFase(ctx, raiz, cfg, &fases, f, pausaCh, notif, estadoFallback, &novasNaRodada)
 		if err := salvarFases(csvPath, fases); err != nil {
 			fmt.Printf("AVISO: nao consegui salvar %s: %v\n", csvPath, err)
 		}
@@ -299,7 +301,7 @@ func depsPendentes(fases []*Fase, f *Fase) []string {
 // ctx permite interromper (Ctrl+C) o run do claude em andamento; pausaCh
 // habilita a pausa manual durante a espera da franquia; notif dispara os
 // avisos remotos (franquia esgotada, marcos concluidos).
-func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, f *Fase, pausaCh <-chan struct{}, notif *Notificador, estadoFallback *EstadoFallback) error {
+func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas *[]*Fase, f *Fase, pausaCh <-chan struct{}, notif *Notificador, estadoFallback *EstadoFallback, novasNaRodada *int) error {
 	fmt.Printf("\n════════ Fase %s — %s ════════\n", f.Fase, f.Titulo)
 
 	// retomada: uma fase `pausada` foi interrompida no meio e tem trabalho nao
@@ -324,7 +326,7 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 
 	f.Status = StExecutando
 	f.Tentativas++
-	_ = salvarFases(caminhoCSV(raiz), todas)
+	_ = salvarFases(caminhoCSV(raiz), *todas)
 	notif.enviarEvento("fase_iniciada", fmt.Sprintf("Praxis: Fase %s iniciada", f.Fase), f.Titulo)
 
 	custo := 0.0
@@ -474,6 +476,7 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 	}
 
 	// 3) revisor (contexto limpo, so leitura) + no maximo MaxCiclosRevisao correcoes
+	var fasesNovasAprovadas []FaseNova
 	for ciclo := 0; ; ciclo++ {
 		fmt.Println("▶ revisor (contexto limpo, so leitura)")
 		resRev, _, err := rodar("revisar", "revisor.md", fmt.Sprintf("revisor%d", ciclo+1), nil, schemaVeredito, true)
@@ -489,7 +492,11 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 		}
 		if ver.Veredito == "APROVADO" {
 			fmt.Println("  revisor: APROVADO")
+			fasesNovasAprovadas = ver.FasesNovas
 			break
+		}
+		if len(ver.FasesNovas) > 0 {
+			fmt.Printf("  revisor sugeriu %d fase(s) nova(s) num veredito REPROVADO — ignoradas (so valem com APROVADO)\n", len(ver.FasesNovas))
 		}
 		fmt.Printf("  revisor: REPROVADO\n%s\n", indentar("- "+strings.Join(ver.Problemas, "\n- "), "    "))
 		notif.enviarEvento("revisor_reprovou", fmt.Sprintf("Praxis: revisor reprovou a Fase %s", f.Fase), strings.Join(ver.Problemas, "\n"))
@@ -544,6 +551,44 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 		}
 	}
 
+	// 4.5) fases descobertas pelo revisor: valida, deduplica, respeita o teto da
+	// rodada, insere no CSV e anexa a spec ao plano ANTES do commit da fase (a
+	// spec viaja no mesmo commit). Roda DEPOIS da guarda do plano para nao
+	// mascarar um executor que nao atualizou o plano.
+	if len(fasesNovasAprovadas) > 0 && cfg.MaxFasesNovas >= 0 {
+		restante := cfg.MaxFasesNovas - *novasNaRodada
+		if restante < 0 {
+			restante = 0
+		}
+		aceitas, specs, descartadas := prepararFasesNovas(*todas, f, fasesNovasAprovadas, restante)
+		var inseridas []*Fase
+		for i, nova := range aceitas {
+			if err := anexarSpecFaseNova(filepath.Join(raiz, cfg.Plano), nova, specs[i]); err != nil {
+				fmt.Printf("  AVISO: nao consegui anexar a spec da fase %s ao plano: %v\n", nova.Fase, err)
+				descartadas = append(descartadas, descarteFaseNova{nova.Titulo, "falha ao escrever a spec no plano"})
+				continue
+			}
+			*todas = append(*todas, nova)
+			*novasNaRodada++
+			inseridas = append(inseridas, nova)
+			fmt.Printf("  + fase nova inserida: %s — %s (depende de %s)\n", nova.Fase, nova.Titulo, strings.Join(nova.DependeDe, ", "))
+		}
+		if len(inseridas) > 0 {
+			if err := salvarFases(caminhoCSV(raiz), *todas); err != nil {
+				fmt.Printf("  AVISO: nao consegui salvar %s: %v\n", caminhoCSV(raiz), err)
+			}
+			notif.enviarEvento("fases_novas_inseridas",
+				fmt.Sprintf("Praxis: %d fase(s) nova(s) descoberta(s) na Fase %s", len(inseridas), f.Fase),
+				resumoFasesNovas(inseridas, *novasNaRodada, cfg.MaxFasesNovas))
+		}
+		if len(descartadas) > 0 {
+			fmt.Printf("  fases novas descartadas:\n%s\n", indentar(formatarDescartes(descartadas), "    "))
+			notif.enviarEvento("fases_novas_descartadas",
+				fmt.Sprintf("Praxis: %d sugestao(oes) de fase descartada(s) na Fase %s", len(descartadas), f.Fase),
+				formatarDescartes(descartadas))
+		}
+	}
+
 	// 5) commit local por repositorio tocado (sem push)
 	trailer := coAuthorTrailer(motorExecutor)
 	if trailer != "" {
@@ -571,12 +616,12 @@ func pipelineFase(ctx context.Context, raiz string, cfg *Config, todas []*Fase, 
 	f.ConcluidoEm = agoraLegivel()
 	f.Observacao = fmt.Sprintf("ok — custo US$ %.2f", custo)
 	fmt.Printf("✔ Fase %s concluida (custo US$ %.2f)\n", f.Fase, custo)
-	notif.enviarEvento("fase_concluida", fmt.Sprintf("Praxis: Fase %s concluida", f.Fase), resumoAndamento(todas))
+	notif.enviarEvento("fase_concluida", fmt.Sprintf("Praxis: Fase %s concluida", f.Fase), resumoAndamento(*todas))
 
 	// 7) marco notificavel: avisa remotamente que a fase concluiu, com o
 	// panorama do andamento (quantas concluidas, pendentes, falhas...).
 	if f.Notificar {
-		notif.enviarEvento("marco_concluido", fmt.Sprintf("Praxis: Fase %s — %s concluida", f.Fase, f.Titulo), resumoAndamento(todas))
+		notif.enviarEvento("marco_concluido", fmt.Sprintf("Praxis: Fase %s — %s concluida", f.Fase, f.Titulo), resumoAndamento(*todas))
 	}
 	return nil
 }
