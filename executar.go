@@ -14,7 +14,7 @@ import (
 	"syscall"
 )
 
-const schemaVeredito = `{"type":"object","required":["veredito","problemas"],"properties":{"veredito":{"type":"string","enum":["APROVADO","REPROVADO"]},"problemas":{"type":"array","items":{"type":"string"}},"fases_novas":{"type":"array","items":{"type":"object","required":["titulo","descricao"],"properties":{"titulo":{"type":"string"},"descricao":{"type":"string"},"checklist":{"type":"array","items":{"type":"string"}},"depende_de":{"type":"array","items":{"type":"string"}},"gate_extra":{"type":"string"},"observacao":{"type":"string"}}}}}}`
+const schemaVeredito = `{"type":"object","required":["veredito","problemas"],"properties":{"veredito":{"type":"string","enum":["APROVADO","REPROVADO"]},"problemas":{"type":"array","items":{"type":"string"}},"fases_novas":{"type":"array","items":{"type":"object","required":["titulo","descricao","valor"],"properties":{"titulo":{"type":"string"},"descricao":{"type":"string"},"valor":{"type":"string","enum":["alto","baixo"]},"checklist":{"type":"array","items":{"type":"string"}},"depende_de":{"type":"array","items":{"type":"string"}},"gate_extra":{"type":"string"},"observacao":{"type":"string"}}}}}}`
 
 type Veredito struct {
 	Veredito   string     `json:"veredito"`

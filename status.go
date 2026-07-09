@@ -51,6 +51,8 @@ func iconeStatus(s string) string {
 		return "⏯️"
 	case StAdiada:
 		return "⏭️"
+	case StAvaliar:
+		return "🔍"
 	default:
 		return "⬜"
 	}

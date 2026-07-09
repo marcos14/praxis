@@ -11,4 +11,20 @@ Verifique:
 
 Seja criterioso, mas pragmático: reprove apenas por problemas que exigem correção antes do commit (critério da fase não atendido, bug, ausência de teste, violação de regra do projeto). Detalhe cosmético não reprova.
 
-Sua resposta final deve ser apenas o veredito no formato estruturado solicitado: `veredito` (APROVADO ou REPROVADO) e `problemas` (lista objetiva; vazia quando APROVADO; cada item citando arquivo/motivo quando REPROVADO).
+Trabalho legítimo FORA do escopo da fase (a subseção "Pendências descobertas" do Registro de Andamento, ou algo que você mesmo identificar no diff) NÃO reprova: declare-o em `fases_novas` num veredito APROVADO, para o orquestrador inserir na fila de execução.
+
+**Critério para abrir uma fase nova (seja RIGOROSO).** Cada fase nova gera custo e atrasa a conclusão do plano, então só proponha uma quando ela representa trabalho real e necessário. Antes de incluir uma entrada, confirme que TODAS as condições abaixo são verdadeiras:
+- É uma pendência concreta e acionável, não uma ideia vaga, um "seria bom", um TODO especulativo ou um refinamento cosmético.
+- Não é resolvível trivialmente dentro do escopo já entregue nem duplica uma fase existente.
+- A ausência dela deixa um risco real (bug latente, falha de segurança, dado corrompido, regra do projeto violada, funcionalidade prometida faltando) ou um débito técnico que claramente precisará ser pago.
+Na dúvida, NÃO abra a fase — prefira registrar a observação no Registro de Andamento a poluir a fila.
+
+**Classifique o valor técnico de cada fase nova** no campo `valor`:
+- `alto`: essencial. Sem ela há bug, brecha de segurança, perda de dado, violação de regra do projeto ou funcionalidade central faltando. Entra direto na fila e é executada automaticamente.
+- `baixo`: melhoria, refinamento, otimização opcional ou nice-to-have. Útil, mas o plano funciona sem ela. Entra com status "avaliar viabilidade" para um humano decidir se compensa — não é executada sozinha.
+Se você hesitar entre `alto` e `baixo`, use `baixo`.
+
+Sua resposta final deve ser apenas o veredito no formato estruturado solicitado:
+- `veredito`: APROVADO ou REPROVADO.
+- `problemas`: lista objetiva; vazia quando APROVADO; cada item citando arquivo/motivo quando REPROVADO.
+- `fases_novas` (opcional, só considerado com APROVADO): uma entrada por pendência real fora do escopo, com `titulo` (curto, único, sem repetir fases já existentes no plano), `descricao` (meta objetiva de 1-3 frases), `valor` ("alto" ou "baixo", conforme o critério acima), `checklist` (itens verificáveis), `depende_de` (ids de fases existentes, ex.: "Fase 3a"; vazio se só depender da fase atual), `gate_extra` e `observacao` (opcionais). Não invente trabalho: sem pendência real, omita o campo ou envie lista vazia.

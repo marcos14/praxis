@@ -15,7 +15,8 @@ const (
 	StFalhou     = "falhou"
 	StBloqueada  = "bloqueada"
 	StAdiada     = "adiada"
-	StPausada    = "pausada" // em andamento, com trabalho nao commitado que pertence a ela; retomavel
+	StPausada    = "pausada"             // em andamento, com trabalho nao commitado que pertence a ela; retomavel
+	StAvaliar    = "avaliar viabilidade" // fase nova de baixo valor tecnico: nao executa sozinha; humano decide se vale implementar
 )
 
 var cabecalhoCSV = []string{

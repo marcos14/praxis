@@ -15,6 +15,18 @@ type FaseNova struct {
 	DependeDe  []string `json:"depende_de"`
 	GateExtra  string   `json:"gate_extra"`
 	Observacao string   `json:"observacao"`
+	// Valor classifica o valor tecnico da pendencia: "alto" (essencial; entra
+	// na fila e executa sozinha) ou "baixo" (melhoria/refinamento opcional; entra
+	// como StAvaliar para um humano decidir se vale a pena). Qualquer coisa fora
+	// de "alto" e tratada como baixo valor, por seguranca.
+	Valor string `json:"valor"`
+}
+
+// altoValor informa se a fase nova deve entrar direto na fila de execucao.
+// So "alto" (case-insensitive) qualifica; ausencia ou qualquer outro valor cai
+// no caminho conservador (avaliar viabilidade), reduzindo fases futeis.
+func (nf FaseNova) altoValor() bool {
+	return strings.EqualFold(strings.TrimSpace(nf.Valor), "alto")
 }
 
 type descarteFaseNova struct{ Titulo, Motivo string }
@@ -84,6 +96,15 @@ func prepararFasesNovas(todas []*Fase, atual *Fase, sugeridas []FaseNova, restan
 			Observacao: firstNonEmpty(strings.TrimSpace(nf.Observacao),
 				fmt.Sprintf("descoberta pelo revisor na Fase %s", atual.Fase)),
 		}
+		// Baixo valor tecnico (ou valor nao classificado): nao executa sozinha.
+		// Nasce como StAvaliar e exige decisao humana antes de virar pendente,
+		// evitando que o motor crie fases futeis que geram custo e atraso.
+		if !nf.altoValor() {
+			nova.Status = StAvaliar
+			nova.RequerHumano = true
+			nova.Observacao = firstNonEmpty(strings.TrimSpace(nf.Observacao),
+				fmt.Sprintf("baixo valor tecnico segundo o revisor na Fase %s — avalie se vale implementar antes de mudar para pendente", atual.Fase))
+		}
 		todas = append(todas, nova) // copia local: so alimenta o dedupe/IDs do lote
 		titulos[chave] = true
 		idPorTitulo[chave] = nova.Fase
@@ -107,9 +128,12 @@ func anexarSpecFaseNova(caminhoPlano string, f *Fase, nf FaseNova) error {
 	if !strings.Contains(string(b), marcadorFasesDescobertas) {
 		s.WriteString("\n---\n\n" + marcadorFasesDescobertas + "\n\nFases inseridas automaticamente a partir de pendencias descobertas pelo revisor.\n")
 	}
-	fmt.Fprintf(&s, "\n### %s — %s\n\nStatus: pendente\nDepende de: %s\n", f.Fase, f.Titulo, strings.Join(f.DependeDe, ", "))
+	fmt.Fprintf(&s, "\n### %s — %s\n\nStatus: %s\nDepende de: %s\n", f.Fase, f.Titulo, f.Status, strings.Join(f.DependeDe, ", "))
 	if f.GateExtra != "" {
 		fmt.Fprintf(&s, "Gate extra: `%s`\n", f.GateExtra)
+	}
+	if f.Status == StAvaliar {
+		s.WriteString("\n> Baixo valor tecnico: aguarda avaliacao humana de viabilidade. Nao sera executada automaticamente enquanto o status for `avaliar viabilidade`.\n")
 	}
 	fmt.Fprintf(&s, "\nMeta: %s\n\n", strings.TrimSpace(nf.Descricao))
 	for _, item := range nf.Checklist {

@@ -49,7 +49,7 @@ func TestPrepararFasesNovasDedupe(t *testing.T) {
 	atual := &Fase{Fase: "Fase 1", Titulo: "Autenticacao por token"}
 	sugeridas := []FaseNova{
 		{Titulo: "  autenticacao POR   token ", Descricao: "duplicada de fase existente"},
-		{Titulo: "Rate limit no endpoint", Descricao: "nova de verdade"},
+		{Titulo: "Rate limit no endpoint", Descricao: "nova de verdade", Valor: "alto"},
 		{Titulo: "rate LIMIT no endpoint", Descricao: "duplicada dentro do lote"},
 		{Titulo: "", Descricao: "sem titulo"},
 		{Titulo: "Sem descricao", Descricao: "   "},
@@ -65,10 +65,37 @@ func TestPrepararFasesNovasDedupe(t *testing.T) {
 		t.Fatalf("esperava 4 descartes, veio %+v", descartadas)
 	}
 	if aceitas[0].Status != StPendente {
-		t.Fatalf("fase nova deveria nascer pendente, veio %q", aceitas[0].Status)
+		t.Fatalf("fase nova de alto valor deveria nascer pendente, veio %q", aceitas[0].Status)
+	}
+	if aceitas[0].RequerHumano {
+		t.Fatal("fase nova de alto valor nao deveria exigir humano")
 	}
 	if aceitas[0].Observacao == "" {
 		t.Fatal("fase nova deveria ganhar observacao default")
+	}
+}
+
+func TestPrepararFasesNovasBaixoValor(t *testing.T) {
+	atual := &Fase{Fase: "Fase 1"}
+	sugeridas := []FaseNova{
+		{Titulo: "Refino opcional", Descricao: "melhoria nice-to-have", Valor: "baixo"},
+		{Titulo: "Sem classificacao", Descricao: "valor ausente cai no caminho conservador"},
+		{Titulo: "Valor invalido", Descricao: "qualquer coisa fora de alto vira avaliar", Valor: "medio"},
+	}
+	aceitas, _, descartadas := prepararFasesNovas(nil, atual, sugeridas, 10)
+	if len(descartadas) != 0 {
+		t.Fatalf("nao esperava descartes, veio %+v", descartadas)
+	}
+	if len(aceitas) != 3 {
+		t.Fatalf("esperava 3 aceitas, veio %d", len(aceitas))
+	}
+	for _, f := range aceitas {
+		if f.Status != StAvaliar {
+			t.Fatalf("%q deveria nascer como %q, veio %q", f.Titulo, StAvaliar, f.Status)
+		}
+		if !f.RequerHumano {
+			t.Fatalf("%q de baixo valor deveria exigir humano", f.Titulo)
+		}
 	}
 }
 
