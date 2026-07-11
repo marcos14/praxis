@@ -147,12 +147,14 @@ func motoresPadrao(modeloLegado, motorLegado string) MotoresConfig {
 	return MotoresConfig{
 		Operacoes: ops,
 		Modelos: map[string]string{
-			"claude": modeloLegado,
-			"codex":  "gpt-5.5",
+			"claude":   modeloLegado,
+			"codex":    "gpt-5.5",
+			"opencode": "",
 		},
 		Esforcos: map[string]string{
-			"claude": "high",
-			"codex":  "high",
+			"claude":   "high",
+			"codex":    "high",
+			"opencode": "",
 		},
 		Fallback: FallbackConfig{Ativo: false, Ordem: []string{"claude", "codex"}},
 	}
@@ -540,6 +542,10 @@ func esforcoValidoParaMotor(motor, esforco string) bool {
 		return esforco == "low" || esforco == "medium" || esforco == "high" || esforco == "xhigh" || esforco == "max"
 	case "codex":
 		return esforco == "low" || esforco == "medium" || esforco == "high"
+	case "opencode":
+		// --variant e especifico do provider (ex.: minimal/low/medium/high/max);
+		// aceitamos qualquer valor nao vazio.
+		return true
 	default:
 		return false
 	}

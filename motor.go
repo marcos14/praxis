@@ -65,8 +65,9 @@ type Motor interface {
 }
 
 var motoresRegistrados = map[string]func() Motor{
-	"claude": func() Motor { return motorClaude{} },
-	"codex":  func() Motor { return motorCodex{} },
+	"claude":   func() Motor { return motorClaude{} },
+	"codex":    func() Motor { return motorCodex{} },
+	"opencode": func() Motor { return motorOpencode{} },
 }
 
 func selecionarMotor(nome string) (Motor, error) {
@@ -108,6 +109,9 @@ func modeloPadrao(nome string) string {
 		return "opus"
 	case "codex":
 		return "gpt-5.5"
+	case "opencode":
+		// deixa o proprio opencode usar o modelo (provider/model) configurado.
+		return ""
 	default:
 		return ""
 	}
@@ -118,6 +122,7 @@ func esforcoPadrao(nome string) string {
 	case "claude", "codex":
 		return "high"
 	default:
+		// opencode usa --variant especifico do provider; deixa o default dele.
 		return ""
 	}
 }
@@ -128,6 +133,8 @@ func coAuthorTrailer(nome string) string {
 		return "Co-Authored-By: Claude <noreply@anthropic.com>"
 	case "codex":
 		return "Co-Authored-By: Codex <noreply@openai.com>"
+	case "opencode":
+		return "Co-Authored-By: opencode <noreply@opencode.ai>"
 	default:
 		return ""
 	}

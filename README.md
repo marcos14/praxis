@@ -31,6 +31,7 @@ notificacao.
 - Pelo menos um motor configurado e logado:
   - `claude` para Claude Code
   - `codex` para OpenAI Codex CLI
+  - `opencode` para OpenCode CLI
 - Go apenas para compilar o Praxis.
 
 ## Compilar
@@ -49,8 +50,8 @@ Copie o binario para `automacao/` do projeto e rode na raiz:
 ```
 
 No modo interativo, o Praxis lista os harnesses encontrados no `PATH` (`claude`,
-`codex`) e pergunta qual usar na inicializacao. O modelo fica no default do
-harness; depois voce pode editar `motores.modelos` no `autopilot.json`.
+`codex`, `opencode`) e pergunta qual usar na inicializacao. O modelo fica no
+default do harness; depois voce pode editar `motores.modelos` no `autopilot.json`.
 
 O comando cria ou atualiza:
 
@@ -91,11 +92,13 @@ Exemplo resumido de `automacao/autopilot.json`:
     },
     "modelos": {
       "claude": "opus",
-      "codex": "gpt-5.5"
+      "codex": "gpt-5.5",
+      "opencode": ""
     },
     "esforcos": {
       "claude": "high",
-      "codex": "high"
+      "codex": "high",
+      "opencode": ""
     },
     "fallback": {
       "ativo": true,
