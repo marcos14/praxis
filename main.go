@@ -32,10 +32,12 @@ USO:
 
   praxis painel [--porta <n>] [--abrir sim|nao] [--raiz <dir>]
       Sobe o painel web com status, logs ao vivo e edicao de motores,
-      notificacoes e auth em /api/config. Edicao exige Basic Auth ativo.
+      notificacoes e do status das fases em /api/config e /api/fase-status.
+      A edicao exige colar o token do painel (botao "Entrar").
 
-  praxis auth [--user <u>] [--pass <s>]
-      Gera a credencial base64 para colar em autopilot.json, bloco "painel".
+  praxis auth [--regenerar] [--raiz <dir>]
+      Mostra o token do painel (bloco "painel" de autopilot.json). Com
+      --regenerar, cria um novo token e invalida o anterior.
 
 CONFIG:
   automacao/autopilot.json e a unica fonte de verdade:
@@ -44,7 +46,7 @@ CONFIG:
     - motores.esforcos: esforco default por motor (ex.: high)
     - motores.fallback: ativo + ordem de fallback
     - notificacoes.canais e notificacoes.eventos
-    - painel.auth_ativo, credencial_base64 e bind
+    - painel.token (gerado automaticamente) e painel.bind
 
   Exemplo: Claude planeja/revisa e Codex executa/corrige:
     "operacoes": {"planejar":"claude","executar":"codex","corrigir":"codex","revisar":"claude"}

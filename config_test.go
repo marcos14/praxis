@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -19,6 +20,7 @@ func TestConfigRoundTrip(t *testing.T) {
 	cfg.AddDirs = []string{`C:\projetos\outro_repo`}
 	cfg.Gates = []Gate{{Nome: "go", Dir: ".", Comandos: []string{"go build ./...", "go test ./..."}}}
 	cfg.GatesExtra = []GateExtra{{Nome: "integration", Comandos: []string{"go test -tags=integration ./..."}}}
+	cfg.Painel.Token = "tok-fixo" // fixa o token para o round-trip nao gerar um novo
 	if err := salvarConfig(raiz, cfg); err != nil {
 		t.Fatalf("salvarConfig: %v", err)
 	}
@@ -81,7 +83,7 @@ func TestCarregarConfigMigraNotificacoesINI(t *testing.T) {
 	if err := os.WriteFile(caminhoConfig(raiz), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ini := "[telegram]\nativo=sim\ntoken=123\nchat_id=42\n[painel]\nauth=sim\nbase64=abc\nbind=127.0.0.1\n"
+	ini := "[telegram]\nativo=sim\ntoken=123\nchat_id=42\n[painel]\nbind=127.0.0.1\n"
 	if err := os.WriteFile(caminhoNotificacoes(raiz), []byte(ini), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -93,8 +95,11 @@ func TestCarregarConfigMigraNotificacoesINI(t *testing.T) {
 	if !tg.Ativo || tg.BotToken != "123" || tg.ChatID != "42" {
 		t.Fatalf("telegram nao migrado: %+v", tg)
 	}
-	if !lida.Painel.AuthAtivo || lida.Painel.CredencialBase64 != "abc" || lida.Painel.Bind != "127.0.0.1" {
+	if lida.Painel.Bind != "127.0.0.1" {
 		t.Fatalf("painel nao migrado: %+v", lida.Painel)
+	}
+	if strings.TrimSpace(lida.Painel.Token) == "" {
+		t.Fatalf("token do painel deveria ser gerado automaticamente")
 	}
 	if _, err := os.Stat(caminhoNotificacoes(raiz) + ".bak"); err != nil {
 		t.Fatalf("ini legado deveria virar .bak: %v", err)

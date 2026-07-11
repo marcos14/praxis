@@ -177,6 +177,7 @@ func handlerPainel(raiz string, est *estadoExecucao) http.Handler {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 	mux.HandleFunc("/api/config", handlerConfigPainel(raiz))
+	mux.HandleFunc("/api/fase-status", handlerFaseStatus(raiz, est))
 	mux.HandleFunc("/api/logs", handlerLogs(raiz))
 	return mux
 }
@@ -203,15 +204,13 @@ func handlerConfigPainel(raiz string) http.HandlerFunc {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			ok, ativo, semCred := painelRequestAutorizado(raiz, r)
-			resp := payloadConfigPainel(cfg, ativo && ok && !semCred)
+			resp := payloadConfigPainel(cfg, painelRequestAutorizado(raiz, r))
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			_ = json.NewEncoder(w).Encode(resp)
 		case http.MethodPost:
-			ok, ativo, semCred := painelRequestAutorizado(raiz, r)
-			if !ativo || semCred || !ok {
-				http.Error(w, "edicao de config exige Basic Auth ativo", http.StatusForbidden)
+			if !painelRequestAutorizado(raiz, r) {
+				http.Error(w, "edicao de config exige token valido do painel", http.StatusForbidden)
 				return
 			}
 			var req painelConfigPayload
@@ -267,7 +266,7 @@ func mascararSegredos(n *NotificacoesConfig, p *PainelConfig) {
 		c.Header = mascararSePreenchido(c.Header)
 		n.Canais[nome] = c
 	}
-	p.CredencialBase64 = mascararSePreenchido(p.CredencialBase64)
+	p.Token = mascararSePreenchido(p.Token)
 }
 
 func mascararSePreenchido(v string) string {
@@ -385,9 +384,7 @@ func aplicarPayloadConfig(cfg *Config, req painelConfigPayload) error {
 		}
 		cfg.Notificacoes.Eventos = eventos
 	}
-	cfg.Painel.AuthAtivo = req.Painel.AuthAtivo
 	cfg.Painel.Bind = strings.TrimSpace(req.Painel.Bind)
-	cfg.Painel.CredencialBase64 = preservarMascara(req.Painel.CredencialBase64, cfg.Painel.CredencialBase64)
 	return validarConfigMotores(cfg)
 }
 
@@ -396,6 +393,61 @@ func preservarMascara(recebido, atual string) string {
 		return atual
 	}
 	return strings.TrimSpace(recebido)
+}
+
+type faseStatusPayload struct {
+	Fase   string `json:"fase"`
+	Status string `json:"status"`
+}
+
+// handlerFaseStatus permite editar remotamente o status de uma fase no
+// fases.csv. Exige token valido do painel.
+func handlerFaseStatus(raiz string, est *estadoExecucao) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "metodo nao permitido", http.StatusMethodNotAllowed)
+			return
+		}
+		if !painelRequestAutorizado(raiz, r) {
+			http.Error(w, "edicao de status exige token valido do painel", http.StatusForbidden)
+			return
+		}
+		var req faseStatusPayload
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "JSON invalido: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		req.Fase = strings.TrimSpace(req.Fase)
+		req.Status = strings.TrimSpace(req.Status)
+		if req.Fase == "" {
+			http.Error(w, "fase obrigatoria", http.StatusBadRequest)
+			return
+		}
+		if !statusValido(req.Status) {
+			http.Error(w, "status invalido: "+req.Status, http.StatusBadRequest)
+			return
+		}
+		csvPath := caminhoCSV(raiz)
+		fases, err := carregarFases(csvPath)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		f := buscarFase(fases, req.Fase)
+		if f == nil {
+			http.Error(w, "fase nao encontrada: "+req.Fase, http.StatusNotFound)
+			return
+		}
+		f.Status = req.Status
+		if err := salvarFases(csvPath, fases); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp := montarStatus(raiz, est)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(resp)
+	}
 }
 
 type painelFase struct {
@@ -413,23 +465,25 @@ type painelFase struct {
 }
 
 type painelStatus struct {
-	Projeto    string         `json:"projeto"`
-	Plano      string         `json:"plano"`
-	Atualizado string         `json:"atualizado"`
-	Erro       string         `json:"erro,omitempty"`
-	Resumo     map[string]int `json:"resumo"`
-	Total      int            `json:"total"`
-	CustoTotal float64        `json:"custo_total"`
-	Execucao   *execInfo      `json:"execucao,omitempty"`
-	Fases      []painelFase   `json:"fases"`
+	Projeto       string         `json:"projeto"`
+	Plano         string         `json:"plano"`
+	Atualizado    string         `json:"atualizado"`
+	Erro          string         `json:"erro,omitempty"`
+	Resumo        map[string]int `json:"resumo"`
+	Total         int            `json:"total"`
+	CustoTotal    float64        `json:"custo_total"`
+	Execucao      *execInfo      `json:"execucao,omitempty"`
+	StatusValidos []string       `json:"status_validos,omitempty"`
+	Fases         []painelFase   `json:"fases"`
 }
 
 func montarStatus(raiz string, est *estadoExecucao) painelStatus {
 	st := painelStatus{
-		Atualizado: agoraLegivel(),
-		Resumo:     map[string]int{},
-		Execucao:   est.info(),
-		Fases:      []painelFase{},
+		Atualizado:    agoraLegivel(),
+		Resumo:        map[string]int{},
+		Execucao:      est.info(),
+		StatusValidos: append([]string(nil), statusValidos...),
+		Fases:         []painelFase{},
 	}
 	if abs, err := filepath.Abs(raiz); err == nil {
 		st.Projeto = filepath.Base(abs)
@@ -822,6 +876,13 @@ const paginaPainel = `<!DOCTYPE html>
   .cfg-actions button{background:var(--accent);color:white;border:0;border-radius:6px;padding:8px 12px;cursor:pointer}
   .cfg-actions button:disabled{background:var(--line);cursor:not-allowed}
   .cfg-note{font-size:12px;color:var(--muted)}
+  .authbox{display:flex;align-items:center;gap:8px;font-size:12px;flex-wrap:wrap}
+  .authbox input{width:170px;background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px}
+  .authbox button{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:6px 10px;cursor:pointer}
+  .authbox button.ghost{background:var(--card2);color:var(--fg);border:1px solid var(--line)}
+  .authbox .who{color:var(--ok);display:inline-flex;align-items:center;gap:6px}
+  .authbox .msg{color:var(--fail)}
+  select.st{background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 6px;font-size:12px}
   @media(max-width:640px){.hide-sm{display:none}}
 </style>
 </head>
@@ -833,6 +894,7 @@ const paginaPainel = `<!DOCTYPE html>
     <div class="sub" id="sub">carregando…</div>
   </div>
   <div class="spacer"></div>
+  <div id="authbox" class="authbox"></div>
   <div class="sub" id="upd"></div>
 </header>
 <main>
@@ -869,9 +931,29 @@ const ROTULO = {concluida:"Concluídas",executando:"Executando",falhou:"Falharam
 const ICONE = {concluida:"✅",executando:"🔄",falhou:"❌",bloqueada:"⏸️",pausada:"⏯️",adiada:"⏭️",pendente:"⬜"};
 function esc(s){return (s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
 function badge(s){return '<span class="badge b-'+esc(s)+'">'+(ICONE[s]||"")+' '+esc(s)+'</span>';}
+function getTok(){ return localStorage.getItem("praxis_token")||""; }
+function setTok(t){ if(t) localStorage.setItem("praxis_token",t); else localStorage.removeItem("praxis_token"); }
+function authHeaders(extra){ const h = Object.assign({}, extra||{}); const t=getTok(); if(t) h["X-Praxis-Token"]=t; return h; }
+function renderAuth(msg){
+  const el = document.getElementById("authbox");
+  if(window.LOGGED){
+    el.innerHTML = '<span class="who">🔓 autenticado</span><button class="ghost" onclick="sair()">Sair</button>';
+  }else{
+    el.innerHTML = '<input id="tok" type="password" placeholder="token do painel" onkeydown="if(event.key===&quot;Enter&quot;)entrar()">'+
+      '<button onclick="entrar()">Entrar</button>'+(msg?'<span class="msg">'+esc(msg)+'</span>':'');
+  }
+}
+async function entrar(){
+  const t = (document.getElementById("tok").value||"").trim();
+  if(!t){ renderAuth("informe o token"); return; }
+  setTok(t);
+  await carregarCfg();
+  if(window.LOGGED){ tick(); } else { setTok(""); renderAuth("token invalido"); }
+}
+function sair(){ setTok(""); window.LOGGED=false; renderAuth(); carregarCfg(); tick(); }
 async function tick(){
   try{
-    const r = await fetch("/api/status",{cache:"no-store"});
+    const r = await fetch("/api/status",{cache:"no-store",headers:authHeaders()});
     const d = await r.json();
     setOffline(false);
     render(d);
@@ -905,6 +987,7 @@ function renderExec(ex){
     '<div class="banner-sub">O painel continua no ar (somente leitura). O Praxis não está mais executando fases.</div></div>';
 }
 function render(d){
+  window.__st = d;
   renderExec(d.execucao);
   document.getElementById("proj").textContent = d.projeto ? "· "+d.projeto : "";
   document.getElementById("upd").textContent = "atualizado " + (d.atualizado||"");
@@ -931,7 +1014,7 @@ function render(d){
     return '<tr>'+
       '<td class="fase-id">'+esc(f.fase)+humano+'</td>'+
       '<td>'+esc(f.titulo)+'</td>'+
-      '<td>'+badge(f.status)+'</td>'+
+      '<td>'+statusCell(f, d.status_validos||[])+'</td>'+
       '<td class="hide-sm deps">'+deps+'</td>'+
       '<td class="hide-sm">'+(f.tentativas||0)+'</td>'+
       '<td class="hide-sm">'+custo+'</td>'+
@@ -939,6 +1022,18 @@ function render(d){
     '</tr>';
   }).join("");
   document.getElementById("linhas").innerHTML = linhas || '<tr><td colspan="7" class="muted">sem fases</td></tr>';
+}
+function statusCell(f, validos){
+  if(!window.LOGGED || !validos.length) return badge(f.status);
+  const opts = validos.map(s=>'<option value="'+esc(s)+'" '+(s===f.status?'selected':'')+'>'+esc(s)+'</option>').join("");
+  return '<select class="st" onchange="mudarStatus(&quot;'+esc(f.fase)+'&quot;,this.value)">'+opts+'</select>';
+}
+async function mudarStatus(fase, status){
+  try{
+    const r = await fetch("/api/fase-status",{method:"POST",headers:authHeaders({"Content-Type":"application/json"}),body:JSON.stringify({fase:fase,status:status})});
+    if(!r.ok){ alert(await r.text()); tick(); return; }
+    render(await r.json());
+  }catch(e){ alert("falha ao atualizar status"); tick(); }
 }
 tick();
 setInterval(tick, 3000);
@@ -949,9 +1044,12 @@ function dis(){ return CFG && CFG.editavel ? '' : 'disabled'; }
 function row(label, html){ return '<div class="cfg-row"><label>'+esc(label)+'</label>'+html+'</div>'; }
 async function carregarCfg(){
   try{
-    const r = await fetch("/api/config",{cache:"no-store"});
+    const r = await fetch("/api/config",{cache:"no-store",headers:authHeaders()});
     CFG = await r.json();
+    window.LOGGED = !!CFG.editavel;
+    renderAuth();
     renderCfg();
+    if(window.__st) render(window.__st);
   }catch(e){
     document.getElementById("cfg").innerHTML = '<div class="err">Falha ao carregar configuração</div>';
   }
@@ -992,8 +1090,6 @@ function renderCfg(){
     h += row(ev, '<input type="checkbox" id="cfg-ev-'+ev+'" '+((d.notificacoes.eventos||{})[ev]?'checked':'')+' '+dis()+'>');
   }
   h += '</div><div><b>Painel</b>';
-  h += row("auth", '<input type="checkbox" id="cfg-auth" '+((d.painel||{}).auth_ativo?'checked':'')+' '+dis()+'>');
-  h += row("credencial", '<input id="cfg-cred" value="'+esc((d.painel||{}).credencial_base64||"")+'" '+dis()+'>');
   h += row("bind", '<input id="cfg-bind" value="'+esc((d.painel||{}).bind||"")+'" '+dis()+'>');
   h += '</div></div><div class="cfg-actions"><button id="cfg-save" '+dis()+' onclick="salvarCfg()">Salvar</button><span id="cfg-msg" class="cfg-note"></span></div>';
   document.getElementById("cfg").innerHTML = h;
@@ -1023,14 +1119,15 @@ async function salvarCfg(){
   };
   const eventos = {};
   for(const ev of d.eventos_conhecidos||[]) eventos[ev] = chk("cfg-ev-"+ev);
-  const payload = {motores:motores, notificacoes:{canais:canais,eventos:eventos}, painel:{auth_ativo:chk("cfg-auth"), credencial_base64:val("cfg-cred"), bind:val("cfg-bind")}};
+  const payload = {motores:motores, notificacoes:{canais:canais,eventos:eventos}, painel:{bind:val("cfg-bind")}};
   document.getElementById("cfg-msg").textContent = "salvando...";
-  const r = await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+  const r = await fetch("/api/config",{method:"POST",headers:authHeaders({"Content-Type":"application/json"}),body:JSON.stringify(payload)});
   if(!r.ok){ document.getElementById("cfg-msg").textContent = await r.text(); return; }
   CFG = await r.json();
   document.getElementById("cfg-msg").textContent = "salvo";
   renderCfg();
 }
+renderAuth();
 carregarCfg();
 
 // --- terminal de logs ao vivo (SSE) ---

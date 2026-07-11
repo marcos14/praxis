@@ -339,13 +339,10 @@ url    =
 # cabeçalho opcional, ex.: Authorization: Bearer SEU_TOKEN
 header =
 
-# --- Painel web (Basic Auth) ----------------------------------------------
-# Protege o painel com usuário/senha. Gere a credencial base64 com:
-#     praxis auth
-# e cole o valor em "base64" abaixo (formato de usuario:senha em base64).
+# --- Painel web -----------------------------------------------------------
+# O painel usa um token gerado automaticamente em autopilot.json (bloco
+# "painel"). Veja/regenere com: praxis auth [--regenerar]
 [painel]
-auth   = nao
-base64 =
 # bind opcional: 127.0.0.1 restringe o painel ao próprio servidor
 # (acesse de fora via túnel SSH). Vazio = todas as interfaces da rede.
 bind   =

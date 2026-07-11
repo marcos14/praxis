@@ -82,9 +82,8 @@ type CanalNotificacao struct {
 }
 
 type PainelConfig struct {
-	AuthAtivo        bool   `json:"auth_ativo"`
-	CredencialBase64 string `json:"credencial_base64,omitempty"`
-	Bind             string `json:"bind,omitempty"`
+	Token string `json:"token,omitempty"` // gerado automaticamente; quem tem acesso ao projeto usa para editar no painel
+	Bind  string `json:"bind,omitempty"`
 }
 
 var operacoesValidas = []string{"planejar", "executar", "corrigir", "revisar"}
@@ -342,6 +341,9 @@ func normalizarConfig(raiz string, cfg *Config) error {
 			cfg.Notificacoes.Canais[nome] = CanalNotificacao{}
 		}
 	}
+	if strings.TrimSpace(cfg.Painel.Token) == "" {
+		cfg.Painel.Token = gerarToken()
+	}
 	return validarConfigMotores(cfg)
 }
 
@@ -427,7 +429,7 @@ func escreverConfigExemplo(raiz string, cfg *Config) error {
 		canal.Header = ""
 		ex.Notificacoes.Canais[nome] = canal
 	}
-	ex.Painel.CredencialBase64 = ""
+	ex.Painel.Token = ""
 	return escreverJSONAtomico(caminhoConfigExemplo(raiz), ex, 0o644)
 }
 
@@ -461,9 +463,7 @@ func importarNotificacoesLegadas(raiz string, cfg *Config) {
 	}
 	cfg.Notificacoes = n
 	cfg.Painel = PainelConfig{
-		AuthAtivo:        ehSim(ini.get("painel", "auth")),
-		CredencialBase64: strings.TrimSpace(ini.get("painel", "base64")),
-		Bind:             strings.TrimSpace(ini.get("painel", "bind")),
+		Bind: strings.TrimSpace(ini.get("painel", "bind")),
 	}
 	_ = os.Rename(caminhoNotificacoes(raiz), caminhoNotificacoes(raiz)+".bak")
 }

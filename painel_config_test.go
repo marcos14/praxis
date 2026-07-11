@@ -1,13 +1,14 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+const tokenTeste = "tok-teste-123"
 
 func TestAPIConfigMascaraSegredos(t *testing.T) {
 	raiz := t.TempDir()
@@ -17,14 +18,13 @@ func TestAPIConfigMascaraSegredos(t *testing.T) {
 	tg.BotToken = "SECRET"
 	tg.ChatID = "42"
 	cfg.Notificacoes.Canais["telegram"] = tg
-	cfg.Painel.AuthAtivo = true
-	cfg.Painel.CredencialBase64 = base64.StdEncoding.EncodeToString([]byte("u:p"))
+	cfg.Painel.Token = tokenTeste
 	if err := salvarConfig(raiz, cfg); err != nil {
 		t.Fatal(err)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
-	req.Header.Set("Authorization", "Basic "+cfg.Painel.CredencialBase64)
+	req.Header.Set(cabecalhoToken, tokenTeste)
 	rr := httptest.NewRecorder()
 	handlerConfigPainel(raiz).ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -50,8 +50,7 @@ func TestAPIConfigPostPreservaMascara(t *testing.T) {
 	tg.BotToken = "SECRET"
 	tg.ChatID = "42"
 	cfg.Notificacoes.Canais["telegram"] = tg
-	cfg.Painel.AuthAtivo = true
-	cfg.Painel.CredencialBase64 = base64.StdEncoding.EncodeToString([]byte("u:p"))
+	cfg.Painel.Token = tokenTeste
 	if err := salvarConfig(raiz, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +64,7 @@ func TestAPIConfigPostPreservaMascara(t *testing.T) {
 	b, _ := json.Marshal(payload)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(string(b)))
-	req.Header.Set("Authorization", "Basic "+cfg.Painel.CredencialBase64)
+	req.Header.Set(cabecalhoToken, tokenTeste)
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	handlerConfigPainel(raiz).ServeHTTP(rr, req)
@@ -107,8 +106,7 @@ func TestAPIConfigPostSemAuthFalha(t *testing.T) {
 func TestAPIConfigPostEventoInvalidoFalha(t *testing.T) {
 	raiz := t.TempDir()
 	cfg := configPadrao()
-	cfg.Painel.AuthAtivo = true
-	cfg.Painel.CredencialBase64 = base64.StdEncoding.EncodeToString([]byte("u:p"))
+	cfg.Painel.Token = tokenTeste
 	if err := salvarConfig(raiz, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -116,11 +114,69 @@ func TestAPIConfigPostEventoInvalidoFalha(t *testing.T) {
 	payload.Notificacoes.Eventos["evento_inexistente"] = true
 	b, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(string(b)))
-	req.Header.Set("Authorization", "Basic "+cfg.Painel.CredencialBase64)
+	req.Header.Set(cabecalhoToken, tokenTeste)
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	handlerConfigPainel(raiz).ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("POST com evento invalido deveria falhar com 400, veio %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func prepararFasesCSV(t *testing.T, raiz string) {
+	t.Helper()
+	cfg := configPadrao()
+	cfg.Painel.Token = tokenTeste
+	if err := salvarConfig(raiz, cfg); err != nil {
+		t.Fatal(err)
+	}
+	fases := []*Fase{{Fase: "1", Titulo: "primeira", Status: StPendente}}
+	if err := salvarFases(caminhoCSV(raiz), fases); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAPIFaseStatusAtualiza(t *testing.T) {
+	raiz := t.TempDir()
+	prepararFasesCSV(t, raiz)
+
+	body := `{"fase":"1","status":"concluida"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/fase-status", strings.NewReader(body))
+	req.Header.Set(cabecalhoToken, tokenTeste)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handlerFaseStatus(raiz, nil).ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /api/fase-status: %d %s", rr.Code, rr.Body.String())
+	}
+	fases, err := carregarFases(caminhoCSV(raiz))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := buscarFase(fases, "1").Status; got != StConcluida {
+		t.Fatalf("status nao atualizado, veio %q", got)
+	}
+}
+
+func TestAPIFaseStatusSemTokenFalha(t *testing.T) {
+	raiz := t.TempDir()
+	prepararFasesCSV(t, raiz)
+	req := httptest.NewRequest(http.MethodPost, "/api/fase-status", strings.NewReader(`{"fase":"1","status":"concluida"}`))
+	rr := httptest.NewRecorder()
+	handlerFaseStatus(raiz, nil).ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("POST sem token deveria falhar com 403, veio %d", rr.Code)
+	}
+}
+
+func TestAPIFaseStatusInvalidoFalha(t *testing.T) {
+	raiz := t.TempDir()
+	prepararFasesCSV(t, raiz)
+	req := httptest.NewRequest(http.MethodPost, "/api/fase-status", strings.NewReader(`{"fase":"1","status":"voando"}`))
+	req.Header.Set(cabecalhoToken, tokenTeste)
+	rr := httptest.NewRecorder()
+	handlerFaseStatus(raiz, nil).ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status invalido deveria falhar com 400, veio %d: %s", rr.Code, rr.Body.String())
 	}
 }

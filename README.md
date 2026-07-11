@@ -196,26 +196,28 @@ commit local. Ele nunca faz `git push`.
 
 O painel mostra status, progresso e logs ao vivo. Ele tambem edita os blocos
 `motores`, `notificacoes` e `painel` do `autopilot.json` via `GET/POST
-/api/config`.
+/api/config`, e o status de cada fase via `POST /api/fase-status`.
 
-Edicao de configuracao exige Basic Auth ativo. Gere a credencial:
+A edicao exige autenticar com o token do painel, gerado automaticamente no
+bloco `painel` do `autopilot.json`. Veja o token com:
 
 ```powershell
 .\automacao\praxis.exe auth
+.\automacao\praxis.exe auth --regenerar   # gera um novo token
 ```
 
-Cole em:
+No painel, clique em **Entrar** e cole o token. O bloco fica assim:
 
 ```json
 "painel": {
-  "auth_ativo": true,
-  "credencial_base64": "BASE64_DE_USUARIO_SENHA",
+  "token": "TOKEN_GERADO_AUTOMATICAMENTE",
   "bind": "127.0.0.1"
 }
 ```
 
-Quando o painel esta sem auth, a tela de configuracao fica somente leitura e
-`POST /api/config` retorna erro.
+Quem tem acesso ao projeto (e portanto ao `autopilot.json`) pode pegar o token
+e autenticar. Sem token valido, a tela de configuracao e o status das fases
+ficam somente leitura e os `POST` retornam erro.
 
 ## Notificacoes
 
@@ -261,4 +263,4 @@ interface generica e nao precisa conhecer detalhes do harness.
 | `inicializar.go` | planejamento inicial |
 | `config.go` | `autopilot.json` unificado |
 | `painel.go` | painel e edicao de config |
-| `notificacoes.go` / `auth.go` | notificacoes e Basic Auth |
+| `notificacoes.go` / `auth.go` | notificacoes e token do painel |

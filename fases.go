@@ -24,6 +24,21 @@ var cabecalhoCSV = []string{
 	"gate_extra", "modelo", "tentativas", "custo_usd", "concluido_em", "observacao",
 }
 
+// statusValidos lista os status que um humano pode atribuir a uma fase pelo
+// painel (mesma ordem exibida no seletor).
+var statusValidos = []string{
+	StPendente, StExecutando, StConcluida, StFalhou, StBloqueada, StAdiada, StPausada, StAvaliar,
+}
+
+func statusValido(s string) bool {
+	for _, v := range statusValidos {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
 type Fase struct {
 	Fase         string
 	Titulo       string

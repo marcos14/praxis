@@ -1,21 +1,22 @@
 package main
 
 import (
-	"bufio"
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
 	"flag"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 )
 
-// authPainel e a configuracao de Basic Auth do painel, lida do autopilot.json.
+// cabecalhoToken e o header HTTP onde o painel envia o token de edicao.
+const cabecalhoToken = "X-Praxis-Token"
+
+// authPainel e a configuracao de acesso do painel, lida do autopilot.json.
 type authPainel struct {
-	ativo  bool
-	base64 string
-	bind   string
+	token string
+	bind  string
 }
 
 func carregarAuthPainel(raiz string) authPainel {
@@ -24,95 +25,78 @@ func carregarAuthPainel(raiz string) authPainel {
 		return authPainel{}
 	}
 	return authPainel{
-		ativo:  cfg.Painel.AuthAtivo,
-		base64: strings.TrimSpace(cfg.Painel.CredencialBase64),
-		bind:   strings.TrimSpace(cfg.Painel.Bind),
+		token: strings.TrimSpace(cfg.Painel.Token),
+		bind:  strings.TrimSpace(cfg.Painel.Bind),
 	}
 }
 
-// comBasicAuth protege um handler com HTTP Basic Auth, relendo a credencial do
-// autopilot.json a cada requisicao.
-func comBasicAuth(raiz string, h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ok, ativo, semCred := painelRequestAutorizado(raiz, r)
-		if !ativo {
-			h.ServeHTTP(w, r)
-			return
-		}
-		if semCred {
-			http.Error(w, "painel com auth ativo, mas sem credencial configurada", http.StatusServiceUnavailable)
-			return
-		}
-		if !ok {
-			w.Header().Set("WWW-Authenticate", `Basic realm="Praxis"`)
-			http.Error(w, "autenticacao necessaria", http.StatusUnauthorized)
-			return
-		}
-		h.ServeHTTP(w, r)
-	})
+// gerarToken cria um token aleatorio url-safe, guardado no autopilot.json. Quem
+// tem acesso ao projeto pega esse token e autentica no painel para editar.
+func gerarToken() string {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-func painelRequestAutorizado(raiz string, r *http.Request) (ok, ativo, semCred bool) {
+// tokenDaRequisicao extrai o token do header X-Praxis-Token ou de um
+// "Authorization: Bearer <token>".
+func tokenDaRequisicao(r *http.Request) string {
+	if t := strings.TrimSpace(r.Header.Get(cabecalhoToken)); t != "" {
+		return t
+	}
+	if a := r.Header.Get("Authorization"); strings.HasPrefix(a, "Bearer ") {
+		return strings.TrimSpace(strings.TrimPrefix(a, "Bearer "))
+	}
+	return ""
+}
+
+// painelRequestAutorizado diz se a requisicao trouxe o token valido do painel.
+// Leitura e sempre liberada; so a edicao (config/status) exige o token.
+func painelRequestAutorizado(raiz string, r *http.Request) bool {
 	auth := carregarAuthPainel(raiz)
-	if !auth.ativo {
-		return false, false, false
+	if auth.token == "" {
+		return false
 	}
-	if auth.base64 == "" {
-		return false, true, true
+	fornecido := tokenDaRequisicao(r)
+	if fornecido == "" {
+		return false
 	}
-	esperado := "Basic " + auth.base64
-	fornecido := r.Header.Get("Authorization")
-	return subtle.ConstantTimeCompare([]byte(fornecido), []byte(esperado)) == 1, true, false
+	return subtle.ConstantTimeCompare([]byte(fornecido), []byte(auth.token)) == 1
 }
 
-func servirPainel(raiz string, est *estadoExecucao, auth authPainel) http.Handler {
-	h := handlerPainel(raiz, est)
-	if auth.ativo {
-		fmt.Println("painel protegido por Basic Auth")
-		return comBasicAuth(raiz, h)
-	}
-	return h
+func servirPainel(raiz string, est *estadoExecucao, _ authPainel) http.Handler {
+	return handlerPainel(raiz, est)
 }
 
-// cmdAuth gera a credencial base64 (usuario:senha) para o Basic Auth do painel
-// e imprime o trecho pronto para colar no autopilot.json.
+// cmdAuth mostra (ou regenera) o token do painel gravado no autopilot.json.
 func cmdAuth(argv []string) error {
 	fs := flag.NewFlagSet("auth", flag.ExitOnError)
-	user := fs.String("user", "", "usuario")
-	pass := fs.String("pass", "", "senha (atencao: fica no historico do shell)")
+	raizFlag := fs.String("raiz", "", "raiz do projeto (padrao: deteccao automatica)")
+	regenerar := fs.Bool("regenerar", false, "gera um novo token, invalidando o anterior")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
-	entrada := bufio.NewReader(os.Stdin)
-	u := strings.TrimSpace(*user)
-	if u == "" {
-		fmt.Print("Usuario: ")
-		l, _ := entrada.ReadString('\n')
-		u = strings.TrimSpace(l)
+	raiz := resolverRaiz(*raizFlag)
+	cfg, err := carregarConfig(raiz)
+	if err != nil {
+		return err
 	}
-	p := *pass
-	if p == "" {
-		fmt.Print("Senha (sera exibida; evite em telas compartilhadas): ")
-		l, _ := entrada.ReadString('\n')
-		p = strings.TrimRight(l, "\r\n")
+	if *regenerar || strings.TrimSpace(cfg.Painel.Token) == "" {
+		cfg.Painel.Token = gerarToken()
+		if err := salvarConfig(raiz, cfg); err != nil {
+			return err
+		}
 	}
-	if u == "" || p == "" {
-		return fmt.Errorf("usuario e senha sao obrigatorios")
-	}
-	cred := base64.StdEncoding.EncodeToString([]byte(u + ":" + p))
 	fmt.Printf(`
-Credencial gerada. Cole no bloco "painel" de automacao/autopilot.json:
+Token do painel (bloco "painel" de automacao/autopilot.json):
 
-  "painel": {
-    "auth_ativo": true,
-    "credencial_base64": "%s",
-    "bind": ""
-  }
+  %s
 
-Para testar:
-  curl -H "Authorization: Basic %s" http://localhost:%d/
-
-Dica: mantenha o painel so no servidor com "bind = 127.0.0.1" e acesse por tunel SSH.
-`, cred, cred, portaPainelPadrao)
+Abra o painel, clique em "Entrar" e cole esse token para liberar a edicao de
+motores, notificacoes e do status das fases. Compartilhe apenas com quem pode
+alterar a execucao. Use "praxis auth --regenerar" para invalidar o token atual.
+`, cfg.Painel.Token)
 	return nil
 }
