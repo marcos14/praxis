@@ -55,7 +55,9 @@ func TestAPIConfigPostPreservaMascara(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := payloadConfigPainel(cfg, true)
-	payload.Motores.Operacoes["executar"] = "codex"
+	payload.Motores.ClaudeConfigDirs = map[string]string{"claude_alt": "C:/Users/dev/.claude-alt"}
+	payload.Motores.Operacoes["executar"] = "claude_alt"
+	payload.Motores.Fallback.Ordem = []string{"claude", "claude_alt", "codex"}
 	payload.Motores.Esforcos["codex"] = "medium"
 	c := payload.Notificacoes.Canais["telegram"]
 	c.BotToken = mascaraSegredo
@@ -75,8 +77,14 @@ func TestAPIConfigPostPreservaMascara(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := lida.Motores.Operacoes["executar"]; got != "codex" {
+	if got := lida.Motores.Operacoes["executar"]; got != "claude_alt" {
 		t.Fatalf("motor executar nao salvo: %q", got)
+	}
+	if got := lida.Motores.ClaudeConfigDirs["claude_alt"]; got != "C:/Users/dev/.claude-alt" {
+		t.Fatalf("claude_config_dirs nao salvo: %q", got)
+	}
+	if got := lida.Motores.Fallback.Ordem; len(got) != 3 || got[1] != "claude_alt" {
+		t.Fatalf("fallback.ordem nao persistiu alias: %+v", got)
 	}
 	if got := lida.Motores.Esforcos["codex"]; got != "medium" {
 		t.Fatalf("esforco codex nao salvo: %q", got)

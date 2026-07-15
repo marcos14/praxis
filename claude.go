@@ -166,6 +166,9 @@ func (motorClaude) Rodar(op OpcoesRun) (*ResultadoRun, error) {
 	fmt.Println("  AVISO: Claude em modo BYPASS (--dangerously-skip-permissions): acesso total ao sistema, sem prompts de permissao. Use apenas em ambiente controlado.")
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = op.Raiz
+	if dir := strings.TrimSpace(op.ClaudeConfigDir); dir != "" {
+		cmd.Env = append(cmd.Environ(), "CLAUDE_CONFIG_DIR="+dir)
+	}
 	cmd.Stdin = strings.NewReader(op.Prompt)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

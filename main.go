@@ -4,6 +4,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 const versao = "0.1.0"
@@ -18,6 +19,12 @@ Motores suportados: claude e codex. A escolha e feita por operacao em
 automacao/autopilot.json, que e relido antes de cada run.
 
 USO:
+  praxis --claude-alias-create <alias> [--dir <caminho>] [--usar-em <ops>] [--sem-fallback] [--sem-shell-alias] [--raiz <dir>]
+      Cria/atualiza um alias de conta Claude em motores.claude_config_dirs e
+	  cria atalhos no PowerShell (ex.: claude-alt) para facilitar o login da
+	  segunda conta (CLAUDE_CONFIG_DIR).
+      Exemplo: praxis --claude-alias-create claude_alt --usar-em executar,corrigir
+
   praxis inicializar [--plano <arquivo.md>] [--add-dirs <d1,d2>] [--motor claude|codex] [--modelo <m>] [--versionar sim|nao] [--webhook sim|nao] [--raiz <dir>]
       Prepara um projeto, quebra o plano em micro-fases e gera fases.csv,
       autopilot.json, autopilot.exemplo.json, prompts e logs. No modo
@@ -79,6 +86,17 @@ func main() {
 		fmt.Print(ajuda)
 		os.Exit(2)
 	}
+	if alias, resto, ok, err := parseClaudeAliasCreateArg(os.Args[1:]); ok {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\nERRO: %v\n", err)
+			os.Exit(1)
+		}
+		if err := cmdClaudeAliasCreate(alias, resto); err != nil {
+			fmt.Fprintf(os.Stderr, "\nERRO: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	var err error
 	switch os.Args[1] {
 	case "inicializar", "init":
@@ -91,6 +109,12 @@ func main() {
 		err = cmdPainel(os.Args[2:])
 	case "auth":
 		err = cmdAuth(os.Args[2:])
+	case "claude-alias-create":
+		if len(os.Args) < 3 {
+			err = fmt.Errorf("uso: praxis claude-alias-create <alias> [--dir <caminho>] [--usar-em <ops>] [--sem-fallback] [--sem-shell-alias] [--raiz <dir>]")
+			break
+		}
+		err = cmdClaudeAliasCreate(strings.TrimSpace(os.Args[2]), os.Args[3:])
 	case "ajuda", "help", "--help", "-h":
 		fmt.Print(ajuda)
 	case "versao", "--version", "-v":
@@ -104,4 +128,28 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\nERRO: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func parseClaudeAliasCreateArg(args []string) (alias string, resto []string, ok bool, err error) {
+	if len(args) == 0 {
+		return "", nil, false, nil
+	}
+	arg := strings.TrimSpace(args[0])
+	if !strings.HasPrefix(arg, "--claude-alias-create") {
+		return "", nil, false, nil
+	}
+	if arg == "--claude-alias-create" {
+		if len(args) < 2 || strings.HasPrefix(strings.TrimSpace(args[1]), "-") {
+			return "", nil, true, fmt.Errorf("faltou o alias: use `praxis --claude-alias-create <alias>`")
+		}
+		return strings.TrimSpace(args[1]), args[2:], true, nil
+	}
+	if strings.HasPrefix(arg, "--claude-alias-create=") {
+		alias = strings.TrimSpace(strings.TrimPrefix(arg, "--claude-alias-create="))
+		if alias == "" {
+			return "", nil, true, fmt.Errorf("faltou o alias apos --claude-alias-create=")
+		}
+		return alias, args[1:], true, nil
+	}
+	return "", nil, true, fmt.Errorf("parametro invalido: %s", arg)
 }

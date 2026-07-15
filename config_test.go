@@ -20,6 +20,10 @@ func TestConfigRoundTrip(t *testing.T) {
 	cfg.AddDirs = []string{`C:\projetos\outro_repo`}
 	cfg.Gates = []Gate{{Nome: "go", Dir: ".", Comandos: []string{"go build ./...", "go test ./..."}}}
 	cfg.GatesExtra = []GateExtra{{Nome: "integration", Comandos: []string{"go test -tags=integration ./..."}}}
+	cfg.Motores.ClaudeConfigDirs = map[string]string{"claude_alt": `C:\Users\dev\.claude-alt`}
+	cfg.Motores.Operacoes["executar"] = "claude_alt"
+	cfg.Motores.Fallback.Ativo = true
+	cfg.Motores.Fallback.Ordem = []string{"claude", "claude_alt", "codex"}
 	cfg.Painel.Token = "tok-fixo" // fixa o token para o round-trip nao gerar um novo
 	if err := salvarConfig(raiz, cfg); err != nil {
 		t.Fatalf("salvarConfig: %v", err)
@@ -191,5 +195,34 @@ func TestContemArquivo(t *testing.T) {
 	}
 	if contemArquivo(nomes, "OUTRO.md") {
 		t.Fatal("nao deveria achar OUTRO.md")
+	}
+}
+
+func TestModeloEsforcoComAliasClaude(t *testing.T) {
+	cfg := configPadrao()
+	cfg.Motores.ClaudeConfigDirs = map[string]string{"claude_alt": "/tmp/claude-alt"}
+	cfg.Motores.Modelos["claude"] = "sonnet"
+	cfg.Motores.Esforcos["claude"] = "medium"
+
+	if got := modeloParaMotor(cfg, "claude_alt"); got != "sonnet" {
+		t.Fatalf("modelo via alias deveria herdar do claude base, veio %q", got)
+	}
+	if got := esforcoParaMotor(cfg, "claude_alt"); got != "medium" {
+		t.Fatalf("esforco via alias deveria herdar do claude base, veio %q", got)
+	}
+	resolvido, err := resolverMotorConfig(cfg, "claude_alt")
+	if err != nil {
+		t.Fatalf("resolverMotorConfig: %v", err)
+	}
+	if resolvido.NomeBase != "claude" || resolvido.ClaudeConfigDir != "/tmp/claude-alt" {
+		t.Fatalf("resolucao de alias inesperada: %+v", resolvido)
+	}
+}
+
+func TestValidarConfigMotorComAliasClaudeInvalido(t *testing.T) {
+	cfg := configPadrao()
+	cfg.Motores.ClaudeConfigDirs = map[string]string{"codex": "/tmp/claude-codex"}
+	if err := normalizarConfig(t.TempDir(), cfg); err == nil {
+		t.Fatal("esperava erro para alias de claude conflitando com motor registrado")
 	}
 }

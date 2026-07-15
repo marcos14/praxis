@@ -14,20 +14,21 @@ import (
 // OpcoesRun descreve uma execucao headless de um motor de codigo, sempre em
 // contexto limpo. Cada motor traduz estas intencoes para suas flags nativas.
 type OpcoesRun struct {
-	Raiz           string
-	Prompt         string
-	Modelo         string
-	Esforco        string
-	AddDirs        []string
-	BudgetUSD      float64
-	TimeoutMin     int
-	Schema         string // se != "", quer saida estruturada conforme este JSON Schema
-	SomenteLeitura bool   // revisor: nao edita arquivos nem commita
-	ProibirCommit  bool   // executor/corretor: quem commita e o orquestrador
-	RotuloLog      string // prefixo do arquivo de log em automacao/logs/
-	Ctx            context.Context
-	PausaCh        <-chan struct{}
-	OnEspera       func(detalhe string)
+	Raiz            string
+	Prompt          string
+	Modelo          string
+	Esforco         string
+	ClaudeConfigDir string
+	AddDirs         []string
+	BudgetUSD       float64
+	TimeoutMin      int
+	Schema          string // se != "", quer saida estruturada conforme este JSON Schema
+	SomenteLeitura  bool   // revisor: nao edita arquivos nem commita
+	ProibirCommit   bool   // executor/corretor: quem commita e o orquestrador
+	RotuloLog       string // prefixo do arquivo de log em automacao/logs/
+	Ctx             context.Context
+	PausaCh         <-chan struct{}
+	OnEspera        func(detalhe string)
 }
 
 // ResultadoRun e a saida normalizada de qualquer motor.

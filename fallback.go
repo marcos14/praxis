@@ -49,32 +49,45 @@ func rodarComFallback(raiz, operacao, motorPrimario string, op OpcoesRun, estado
 		motorAtual = "claude"
 	}
 	for {
-		motor, err := selecionarMotor(motorAtual)
+		cfg, cfgErr := carregarConfig(raiz)
+		resolvido, err := resolverMotorConfig(cfg, motorAtual)
 		if err != nil {
 			return nil, motorAtual, err
 		}
+		motor, err := selecionarMotor(resolvido.NomeBase)
+		if err != nil {
+			return nil, resolvido.NomeBase, err
+		}
 		if op.Modelo == "" {
-			if cfg, err := carregarConfig(raiz); err == nil {
+			if cfgErr == nil {
 				op.Modelo = modeloParaMotor(cfg, motorAtual)
+			} else {
+				op.Modelo = modeloPadrao(resolvido.NomeBase)
 			}
 		}
 		if op.Esforco == "" {
-			if cfg, err := carregarConfig(raiz); err == nil {
+			if cfgErr == nil {
 				op.Esforco = esforcoParaMotor(cfg, motorAtual)
+			} else {
+				op.Esforco = esforcoPadrao(resolvido.NomeBase)
 			}
 		}
-		fmt.Printf("> %s via %s", operacao, motor.Nome())
+		op.ClaudeConfigDir = resolvido.ClaudeConfigDir
+		nomeExibicao := motor.Nome()
+		if resolvido.NomeConfig != resolvido.NomeBase {
+			nomeExibicao = fmt.Sprintf("%s (%s)", resolvido.NomeConfig, resolvido.NomeBase)
+		}
+		fmt.Printf("> %s via %s", operacao, nomeExibicao)
 		if op.Modelo != "" {
 			fmt.Printf(" (modelo %s)", op.Modelo)
 		}
 		fmt.Println()
 		res, err := motor.Rodar(op)
 		if err != nil || res == nil || !res.LimiteSessao {
-			return res, motorAtual, err
+			return res, resolvido.NomeBase, err
 		}
 
 		estado.marcarEsgotado(motorAtual)
-		cfg, cfgErr := carregarConfig(raiz)
 		if cfgErr == nil && cfg.Motores.Fallback.Ativo {
 			if prox := proximoMotorFallback(cfg.Motores.Fallback.Ordem, motorAtual, estado); prox != "" {
 				detalhe := strings.TrimSpace(res.DetalheLimite)
@@ -88,6 +101,11 @@ func rodarComFallback(raiz, operacao, motorPrimario string, op OpcoesRun, estado
 				motorAtual = prox
 				op.Modelo = modeloParaMotor(cfg, motorAtual)
 				op.Esforco = esforcoParaMotor(cfg, motorAtual)
+				if r, err := resolverMotorConfig(cfg, motorAtual); err == nil {
+					op.ClaudeConfigDir = r.ClaudeConfigDir
+				} else {
+					op.ClaudeConfigDir = ""
+				}
 				continue
 			}
 		}

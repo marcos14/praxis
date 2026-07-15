@@ -167,6 +167,56 @@ Exemplo comum:
 }
 ```
 
+Para usar duas contas Claude no mesmo projeto, crie aliases em
+`motores.claude_config_dirs` e use esses aliases em `operacoes` e
+`fallback.ordem`:
+
+```json
+"motores": {
+  "operacoes": {
+    "planejar": "claude",
+    "executar": "claude_alt",
+    "corrigir": "claude_alt",
+    "revisar": "claude"
+  },
+  "claude_config_dirs": {
+    "claude_alt": "C:/Users/seu-usuario/.claude-alt"
+  },
+  "fallback": {
+    "ativo": true,
+    "ordem": ["claude", "claude_alt", "codex"]
+  }
+}
+```
+
+Quando o alias aponta para Claude, o Praxis injeta `CLAUDE_CONFIG_DIR` nessa
+tentativa. Isso permite trocar de conta sem alias externo de shell.
+
+### Criar alias por CLI (assistido)
+
+Voce tambem pode criar o alias direto no Praxis:
+
+```powershell
+praxis --claude-alias-create claude_alt
+```
+
+Com opcoes:
+
+```powershell
+praxis --claude-alias-create claude_alt --dir "C:/Users/seu-usuario/.claude-alt" --usar-em executar,corrigir
+```
+
+O comando:
+
+- cria/atualiza `motores.claude_config_dirs["claude_alt"]`
+- cria atalhos no PowerShell (por padrao) como `claude-alt` e `claude_alt`
+- pode apontar operacoes para o alias com `--usar-em`
+- por padrao, insere o alias em `motores.fallback.ordem` logo apos `claude`
+- imprime os proximos passos para logar a segunda conta no `CLAUDE_CONFIG_DIR`
+
+Para nao alterar a ordem de fallback automaticamente, use `--sem-fallback`.
+Para nao criar atalhos de shell automaticamente, use `--sem-shell-alias`.
+
 Se `motores.fallback.ativo=true`, quando o motor atual sinaliza limite de uso o
 Praxis tenta o proximo motor em `fallback.ordem` que ainda nao esgotou na
 rodada. Se nao houver outro motor, preserva o comportamento anterior: espera o

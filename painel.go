@@ -277,6 +277,26 @@ func mascararSePreenchido(v string) string {
 }
 
 func aplicarPayloadConfig(cfg *Config, req painelConfigPayload) error {
+	if req.Motores.ClaudeConfigDirs != nil {
+		dirs := map[string]string{}
+		for alias, dir := range req.Motores.ClaudeConfigDirs {
+			alias = normalizarNomeMotor(alias)
+			dir = strings.TrimSpace(dir)
+			if alias == "" {
+				continue
+			}
+			if dir == "" {
+				return fmt.Errorf("claude_config_dirs[%s] nao pode ser vazio", alias)
+			}
+			if alias != "claude" {
+				if _, ok := motoresRegistrados[alias]; ok {
+					return fmt.Errorf("alias de claude conflita com motor registrado: %s", alias)
+				}
+			}
+			dirs[alias] = dir
+		}
+		cfg.Motores.ClaudeConfigDirs = dirs
+	}
 	if req.Motores.Operacoes != nil {
 		ops := map[string]string{}
 		for _, op := range operacoesValidas {
@@ -284,7 +304,7 @@ func aplicarPayloadConfig(cfg *Config, req painelConfigPayload) error {
 			if m == "" {
 				m = motorParaOperacao(cfg, op)
 			}
-			if _, err := selecionarMotor(m); err != nil {
+			if _, err := resolverMotorConfig(cfg, m); err != nil {
 				return fmt.Errorf("motor invalido para %s: %w", op, err)
 			}
 			ops[op] = m
@@ -300,7 +320,7 @@ func aplicarPayloadConfig(cfg *Config, req painelConfigPayload) error {
 		modelos := map[string]string{}
 		for motor, modelo := range req.Motores.Modelos {
 			motor = normalizarNomeMotor(motor)
-			if _, err := selecionarMotor(motor); err != nil {
+			if _, err := resolverMotorConfig(cfg, motor); err != nil {
 				return fmt.Errorf("modelo configurado para motor desconhecido %q", motor)
 			}
 			modelos[motor] = strings.TrimSpace(modelo)
@@ -316,11 +336,12 @@ func aplicarPayloadConfig(cfg *Config, req painelConfigPayload) error {
 		esforcos := map[string]string{}
 		for motor, esforco := range req.Motores.Esforcos {
 			motor = normalizarNomeMotor(motor)
-			if _, err := selecionarMotor(motor); err != nil {
+			resolvido, err := resolverMotorConfig(cfg, motor)
+			if err != nil {
 				return fmt.Errorf("esforco configurado para motor desconhecido %q", motor)
 			}
 			esforco = strings.ToLower(strings.TrimSpace(esforco))
-			if !esforcoValidoParaMotor(motor, esforco) {
+			if !esforcoValidoParaMotor(resolvido.NomeBase, esforco) {
 				return fmt.Errorf("esforco invalido para %s: %q", motor, esforco)
 			}
 			esforcos[motor] = esforco
@@ -336,7 +357,7 @@ func aplicarPayloadConfig(cfg *Config, req painelConfigPayload) error {
 			if motor == "" {
 				continue
 			}
-			if _, err := selecionarMotor(motor); err != nil {
+			if _, err := resolverMotorConfig(cfg, motor); err != nil {
 				return fmt.Errorf("motor invalido no fallback: %w", err)
 			}
 			ordem = append(ordem, motor)
@@ -872,6 +893,13 @@ const paginaPainel = `<!DOCTYPE html>
   .cfg-row label{font-size:12px;color:var(--muted)}
   .cfg-row input,.cfg-row select{width:145px;background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px}
   .cfg-row input[type=checkbox]{width:auto}
+	.cfg-sub{margin-top:12px;margin-bottom:6px;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+	.claude-aliases{display:flex;flex-direction:column;gap:8px;margin-top:6px}
+	.claude-alias-row{display:grid;grid-template-columns:1fr 1.6fr auto;gap:8px;align-items:center}
+	.claude-alias-row input{width:100%;background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px}
+	.claude-alias-row button{background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 9px;cursor:pointer}
+	.claude-alias-head{display:grid;grid-template-columns:1fr 1.6fr auto;gap:8px;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+	.cfg-mini{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.4}
   .cfg-actions{display:flex;gap:10px;align-items:center;margin-top:12px}
   .cfg-actions button{background:var(--accent);color:white;border:0;border-radius:6px;padding:8px 12px;cursor:pointer}
   .cfg-actions button:disabled{background:var(--line);cursor:not-allowed}
@@ -1042,6 +1070,87 @@ let CFG = null;
 function opt(v, cur){ return '<option value="'+esc(v)+'" '+(v===cur?'selected':'')+'>'+esc(v)+'</option>'; }
 function dis(){ return CFG && CFG.editavel ? '' : 'disabled'; }
 function row(label, html){ return '<div class="cfg-row"><label>'+esc(label)+'</label>'+html+'</div>'; }
+function motoresComAliases(d){
+	const base = (d.motores_disponiveis||[]).slice();
+	const dirs = ((d.motores||{}).claude_config_dirs||{});
+	for(const alias of Object.keys(dirs||{})){
+		if(!base.includes(alias)) base.push(alias);
+	}
+	return base;
+}
+function aliasesClaudeOrdenados(d){
+	const dirs = ((d.motores||{}).claude_config_dirs||{});
+	const out = [];
+	for(const alias of Object.keys(dirs||{})){
+		const a = (alias||"").trim();
+		const dir = (dirs[alias]||"").trim();
+		if(!a || !dir || a === "claude") continue;
+		out.push({alias:a, dir:dir});
+	}
+	out.sort((x,y)=>x.alias.localeCompare(y.alias));
+	return out;
+}
+function linhaAliasClaude(alias, dir){
+	const travado = dis();
+	const rm = (CFG && CFG.editavel)
+		? '<button type="button" onclick="this.closest(\'.claude-alias-row\').remove()">remover</button>'
+		: '<button type="button" disabled>remover</button>';
+	return '<div class="claude-alias-row">'+
+		'<input data-role="alias" placeholder="ex.: claude_alt" value="'+esc(alias||"")+'" '+travado+'>'+
+		'<input data-role="dir" placeholder="C:/Users/voce/.claude-alt" value="'+esc(dir||"")+'" '+travado+'>'+
+		rm+
+	'</div>';
+}
+function renderAliasClaudeUI(d){
+	const host = document.getElementById("cfg-claude-aliases");
+	if(!host) return;
+	const itens = aliasesClaudeOrdenados(d);
+	let h = '<div class="claude-alias-head"><span>Alias</span><span>CLAUDE_CONFIG_DIR</span><span>Ações</span></div>';
+	h += '<div class="claude-aliases" id="cfg-claude-alias-list">';
+	if(!itens.length){
+		h += linhaAliasClaude("", "");
+	}else{
+		for(const it of itens) h += linhaAliasClaude(it.alias, it.dir);
+	}
+	h += '</div>';
+	if(CFG && CFG.editavel){
+		h += '<div style="margin-top:8px"><button type="button" onclick="addAliasClaude()">+ adicionar conta Claude</button></div>';
+	}
+	h += '<div class="cfg-mini">Use aliases para contas extras (ex.: claude_alt). Depois você pode escolher o alias nas operações e no fallback.</div>';
+	host.innerHTML = h;
+}
+function addAliasClaude(){
+	const el = document.getElementById("cfg-claude-alias-list");
+	if(!el || !(CFG && CFG.editavel)) return;
+	el.insertAdjacentHTML("beforeend", linhaAliasClaude("", ""));
+}
+function coletarAliasesClaude(){
+	const host = document.getElementById("cfg-claude-alias-list");
+	const out = {};
+	if(!host) return out;
+	const rows = host.querySelectorAll(".claude-alias-row");
+	for(const row of rows){
+		const aliasEl = row.querySelector('input[data-role="alias"]');
+		const dirEl = row.querySelector('input[data-role="dir"]');
+		const alias = ((aliasEl && aliasEl.value) || "").trim().toLowerCase();
+		const dir = ((dirEl && dirEl.value) || "").trim();
+		if(!alias && !dir) continue;
+		if(!alias || !dir){
+			document.getElementById("cfg-msg").textContent = "preencha alias e diretório em todas as contas Claude";
+			return null;
+		}
+		if(alias === "claude"){
+			document.getElementById("cfg-msg").textContent = "o alias 'claude' já é reservado para a conta padrão";
+			return null;
+		}
+		if(!/^[a-z][a-z0-9_-]*$/.test(alias)){
+			document.getElementById("cfg-msg").textContent = "alias inválido: use letras, números, _ ou -, começando com letra";
+			return null;
+		}
+		out[alias] = dir;
+	}
+	return out;
+}
 async function carregarCfg(){
   try{
     const r = await fetch("/api/config",{cache:"no-store",headers:authHeaders()});
@@ -1056,7 +1165,8 @@ async function carregarCfg(){
 }
 function renderCfg(){
   const d = CFG;
-  const motores = d.motores_disponiveis || [];
+	const motoresBase = d.motores_disponiveis || [];
+	const motores = motoresComAliases(d);
   const ops = d.operacoes_validas || [];
   const evs = d.eventos_conhecidos || [];
   document.getElementById("cfg-state").textContent = d.editavel ? "editável" : "somente leitura";
@@ -1066,18 +1176,20 @@ function renderCfg(){
     const cur = (d.motores.operacoes||{})[op] || "claude";
     h += row(op, '<select id="cfg-op-'+op+'" '+dis()+'>'+motores.map(m=>opt(m,cur)).join("")+'</select>');
   }
-  for(const m of motores){
+	for(const m of motoresBase){
     const val = ((d.motores.modelos||{})[m] || "");
     h += row("modelo "+m, '<input id="cfg-model-'+m+'" value="'+esc(val)+'" '+dis()+'>');
   }
-  for(const m of motores){
+	for(const m of motoresBase){
     const cur = ((d.motores.esforcos||{})[m] || "");
     const esforcos = m==="claude" ? ["","low","medium","high","xhigh","max"] : ["","low","medium","high"];
     h += row("esforco "+m, '<select id="cfg-effort-'+m+'" '+dis()+'>'+esforcos.map(e=>opt(e,cur)).join("")+'</select>');
   }
+	h += '<div class="cfg-sub">Contas Claude</div><div id="cfg-claude-aliases"></div>';
   const ordem = ((d.motores.fallback||{}).ordem||[]).join(",");
   h += row("fallback", '<input type="checkbox" id="cfg-fb" '+((d.motores.fallback||{}).ativo?'checked':'')+' '+dis()+'>');
   h += row("ordem", '<input id="cfg-fb-ordem" value="'+esc(ordem)+'" '+dis()+'>');
+	h += '<div class="cfg-mini">ordem aceita motores base e aliases Claude separados por vírgula (ex.: claude,claude_alt,codex)</div>';
   h += '</div><div><b>Notificações</b>';
   const canais = d.notificacoes.canais || {};
   h += canalUI("telegram", canais.telegram || {}, ["bot_token","chat_id"]);
@@ -1093,6 +1205,7 @@ function renderCfg(){
   h += row("bind", '<input id="cfg-bind" value="'+esc((d.painel||{}).bind||"")+'" '+dis()+'>');
   h += '</div></div><div class="cfg-actions"><button id="cfg-save" '+dis()+' onclick="salvarCfg()">Salvar</button><span id="cfg-msg" class="cfg-note"></span></div>';
   document.getElementById("cfg").innerHTML = h;
+	renderAliasClaudeUI(d);
 }
 function canalUI(nome, c, campos){
   let h = '<div style="margin-top:10px"><span class="tag">'+esc(nome)+'</span>';
@@ -1106,7 +1219,9 @@ function val(id){ const el=document.getElementById(id); return el ? el.value : "
 function chk(id){ const el=document.getElementById(id); return !!(el && el.checked); }
 async function salvarCfg(){
   const d = CFG;
-  const motores = {operacoes:{}, modelos:{}, esforcos:{}, fallback:{ativo:chk("cfg-fb"), ordem:val("cfg-fb-ordem").split(",").map(s=>s.trim()).filter(Boolean)}};
+	const aliasDirs = coletarAliasesClaude();
+	if(aliasDirs === null) return;
+	const motores = {operacoes:{}, modelos:{}, esforcos:{}, claude_config_dirs:aliasDirs, fallback:{ativo:chk("cfg-fb"), ordem:val("cfg-fb-ordem").split(",").map(s=>s.trim()).filter(Boolean)}};
   for(const op of d.operacoes_validas||[]) motores.operacoes[op] = val("cfg-op-"+op);
   for(const m of d.motores_disponiveis||[]) motores.modelos[m] = val("cfg-model-"+m);
   for(const m of d.motores_disponiveis||[]) motores.esforcos[m] = val("cfg-effort-"+m);

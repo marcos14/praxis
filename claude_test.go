@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -114,5 +115,38 @@ func TestPrimeirasEUltimasLinhas(t *testing.T) {
 	}
 	if got := primeirasLinhas("a\nb", 5); got != "a\nb" {
 		t.Fatalf("primeirasLinhas sem corte: %q", got)
+	}
+}
+
+func TestMotorClaudeUsaClaudeConfigDirNoAmbiente(t *testing.T) {
+	dirBin := t.TempDir()
+	registro := filepath.Join(t.TempDir(), "claude_env.txt")
+	nome := "claude"
+	conteudo := "#!/bin/sh\nprintf '%s' \"$CLAUDE_CONFIG_DIR\" > \"" + registro + "\"\necho '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\",\"total_cost_usd\":0,\"num_turns\":1}'\nexit 0\n"
+	if runtime.GOOS == "windows" {
+		nome = "claude.bat"
+		conteudo = "@echo off\r\n>\"" + registro + "\" echo %CLAUDE_CONFIG_DIR%\r\necho {\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\",\"total_cost_usd\":0,\"num_turns\":1}\r\nexit /b 0\r\n"
+	}
+	caminho := filepath.Join(dirBin, nome)
+	if err := os.WriteFile(caminho, []byte(conteudo), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dirBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	raiz := t.TempDir()
+	const cfgDir = `C:\Users\dev\.claude-alt`
+	res, err := motorClaude{}.Rodar(OpcoesRun{Raiz: raiz, Prompt: "teste", RotuloLog: "env", TimeoutMin: 1, ClaudeConfigDir: cfgDir})
+	if err != nil {
+		t.Fatalf("erro inesperado ao rodar claude fake: %v", err)
+	}
+	if res == nil || res.Subtipo != "success" {
+		t.Fatalf("resultado inesperado: %+v", res)
+	}
+	b, err := os.ReadFile(registro)
+	if err != nil {
+		t.Fatalf("nao consegui ler registro de ambiente: %v", err)
+	}
+	if got := strings.TrimSpace(string(b)); got != cfgDir {
+		t.Fatalf("CLAUDE_CONFIG_DIR inesperado: %q", got)
 	}
 }

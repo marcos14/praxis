@@ -54,10 +54,11 @@ type Config struct {
 }
 
 type MotoresConfig struct {
-	Operacoes map[string]string `json:"operacoes"`
-	Modelos   map[string]string `json:"modelos"`
-	Esforcos  map[string]string `json:"esforcos,omitempty"`
-	Fallback  FallbackConfig    `json:"fallback"`
+	Operacoes        map[string]string `json:"operacoes"`
+	Modelos          map[string]string `json:"modelos"`
+	Esforcos         map[string]string `json:"esforcos,omitempty"`
+	ClaudeConfigDirs map[string]string `json:"claude_config_dirs,omitempty"`
+	Fallback         FallbackConfig    `json:"fallback"`
 }
 
 type FallbackConfig struct {
@@ -312,6 +313,18 @@ func normalizarConfig(raiz string, cfg *Config) error {
 	if len(cfg.Motores.Esforcos) == 0 {
 		cfg.Motores.Esforcos = motoresPadrao(cfg.Modelo, cfg.Motor).Esforcos
 	}
+	if cfg.Motores.ClaudeConfigDirs != nil {
+		norm := map[string]string{}
+		for alias, dir := range cfg.Motores.ClaudeConfigDirs {
+			alias = normalizarNomeMotor(alias)
+			dir = strings.TrimSpace(dir)
+			if alias == "" || dir == "" {
+				continue
+			}
+			norm[alias] = dir
+		}
+		cfg.Motores.ClaudeConfigDirs = norm
+	}
 	for _, motor := range motoresConhecidos() {
 		if strings.TrimSpace(cfg.Motores.Esforcos[motor]) == "" {
 			if e := esforcoPadrao(motor); e != "" {
@@ -352,21 +365,31 @@ func validarConfigMotores(cfg *Config) error {
 		if !operacaoValida(op) {
 			return fmt.Errorf("operacao de motor desconhecida em config: %q", op)
 		}
-		if _, err := selecionarMotor(motor); err != nil {
+		if _, err := resolverMotorConfig(cfg, motor); err != nil {
 			return fmt.Errorf("motor da operacao %s invalido: %w", op, err)
 		}
 	}
 	for _, motor := range cfg.Motores.Fallback.Ordem {
-		if _, err := selecionarMotor(motor); err != nil {
+		if _, err := resolverMotorConfig(cfg, motor); err != nil {
 			return fmt.Errorf("motor invalido na ordem de fallback: %w", err)
 		}
 	}
+	for alias, dir := range cfg.Motores.ClaudeConfigDirs {
+		if strings.TrimSpace(dir) == "" {
+			return fmt.Errorf("claude_config_dirs[%q] nao pode ser vazio", alias)
+		}
+		if alias != "claude" {
+			if _, ok := motoresRegistrados[alias]; ok {
+				return fmt.Errorf("alias de claude conflita com motor registrado: %q", alias)
+			}
+		}
+	}
 	for motor, esforco := range cfg.Motores.Esforcos {
-		motor = normalizarNomeMotor(motor)
-		if _, err := selecionarMotor(motor); err != nil {
+		resolvido, err := resolverMotorConfig(cfg, motor)
+		if err != nil {
 			return fmt.Errorf("esforco configurado para motor desconhecido %q", motor)
 		}
-		if !esforcoValidoParaMotor(motor, esforco) {
+		if !esforcoValidoParaMotor(resolvido.NomeBase, esforco) {
 			return fmt.Errorf("esforco invalido para %s: %q", motor, esforco)
 		}
 	}
@@ -509,27 +532,75 @@ func motorParaOperacao(cfg *Config, operacao string) string {
 
 func modeloParaMotor(cfg *Config, motor string) string {
 	motor = normalizarNomeMotor(motor)
+	base := motor
+	if cfg != nil {
+		if resolvido, err := resolverMotorConfig(cfg, motor); err == nil {
+			base = resolvido.NomeBase
+		}
+	}
 	if cfg == nil {
-		return modeloPadrao(motor)
+		return modeloPadrao(base)
 	}
 	if modelo := strings.TrimSpace(cfg.Motores.Modelos[motor]); modelo != "" {
 		return modelo
 	}
-	if motor == "claude" && strings.TrimSpace(cfg.Modelo) != "" {
+	if modelo := strings.TrimSpace(cfg.Motores.Modelos[base]); modelo != "" {
+		return modelo
+	}
+	if base == "claude" && strings.TrimSpace(cfg.Modelo) != "" {
 		return strings.TrimSpace(cfg.Modelo)
 	}
-	return modeloPadrao(motor)
+	return modeloPadrao(base)
 }
 
 func esforcoParaMotor(cfg *Config, motor string) string {
 	motor = normalizarNomeMotor(motor)
+	base := motor
+	if cfg != nil {
+		if resolvido, err := resolverMotorConfig(cfg, motor); err == nil {
+			base = resolvido.NomeBase
+		}
+	}
 	if cfg == nil {
-		return esforcoPadrao(motor)
+		return esforcoPadrao(base)
 	}
 	if esforco := strings.TrimSpace(cfg.Motores.Esforcos[motor]); esforco != "" {
 		return strings.ToLower(esforco)
 	}
-	return esforcoPadrao(motor)
+	if esforco := strings.TrimSpace(cfg.Motores.Esforcos[base]); esforco != "" {
+		return strings.ToLower(esforco)
+	}
+	return esforcoPadrao(base)
+}
+
+type motorResolvido struct {
+	NomeConfig      string
+	NomeBase        string
+	ClaudeConfigDir string
+}
+
+func resolverMotorConfig(cfg *Config, nome string) (motorResolvido, error) {
+	nome = normalizarNomeMotor(nome)
+	if nome == "" {
+		nome = "claude"
+	}
+	if _, ok := motoresRegistrados[nome]; ok {
+		res := motorResolvido{NomeConfig: nome, NomeBase: nome}
+		if nome == "claude" && cfg != nil && cfg.Motores.ClaudeConfigDirs != nil {
+			res.ClaudeConfigDir = strings.TrimSpace(cfg.Motores.ClaudeConfigDirs["claude"])
+		}
+		return res, nil
+	}
+	if cfg != nil && cfg.Motores.ClaudeConfigDirs != nil {
+		if dir, ok := cfg.Motores.ClaudeConfigDirs[nome]; ok {
+			dir = strings.TrimSpace(dir)
+			if dir == "" {
+				return motorResolvido{}, fmt.Errorf("alias de claude %q sem diretorio de config", nome)
+			}
+			return motorResolvido{NomeConfig: nome, NomeBase: "claude", ClaudeConfigDir: dir}, nil
+		}
+	}
+	return motorResolvido{}, fmt.Errorf("motor desconhecido: %q", nome)
 }
 
 func esforcoValidoParaMotor(motor, esforco string) bool {
